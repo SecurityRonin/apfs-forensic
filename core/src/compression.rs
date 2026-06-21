@@ -149,9 +149,7 @@ fn decode_inline(
             _ => lzvn_decode(payload, uncompressed_size),
         },
         Algorithm::Lzfse => lzfse_decode(payload),
-        // LzBitmap is rejected before dispatch; this arm keeps the match total
-        // against future `#[non_exhaustive]` Algorithm variants.
-        _ => Err(ApfsError::Decmpfs("decmpfs unsupported inline algorithm")), // cov:unreachable: LzBitmap rejected before dispatch; map total
+        _ => unreachable_algorithm(), // cov:unreachable: LzBitmap rejected before dispatch
     }
 }
 
@@ -166,10 +164,17 @@ fn decode_resource_fork(
         Algorithm::Lzvn | Algorithm::Lzfse | Algorithm::Uncompressed => {
             decode_chunked_resource_fork(algorithm, fork, uncompressed_size)
         }
-        _ => Err(ApfsError::Decmpfs(
-            "decmpfs unsupported resource-fork algorithm",
-        )), // cov:unreachable: LzBitmap rejected before dispatch; map total
+        _ => unreachable_algorithm(), // cov:unreachable: LzBitmap rejected before dispatch
     }
+}
+
+/// The decmpfs algorithm dispatch arms below are total against the
+/// `#[non_exhaustive]` [`Algorithm`] enum, but `LzBitmap` is rejected before any
+/// dispatch and every other variant is routed, so this arm is unreachable on real
+/// and crafted input alike — kept as defense-in-depth against a future variant.
+#[inline]
+fn unreachable_algorithm() -> crate::Result<Vec<u8>> {
+    Err(ApfsError::Decmpfs("decmpfs unsupported algorithm")) // cov:unreachable: LzBitmap rejected pre-dispatch, all other variants routed
 }
 
 /// Zlib resource fork (type 4): classic Resource-Manager header + block table.
@@ -248,11 +253,7 @@ fn decode_chunked_resource_fork(
             Algorithm::Uncompressed => chunk.to_vec(),
             // Zlib forks take the classic-header path; LzBitmap is rejected before
             // dispatch. Either here is a routing bug, not bad input.
-            _ => {
-                return Err(ApfsError::Decmpfs(
-                    "decmpfs unexpected algorithm for chunked fork",
-                ))
-            } // cov:unreachable: only Lzvn/Lzfse/Uncompressed routed here
+            _ => return unreachable_algorithm(), // cov:unreachable: only Lzvn/Lzfse/Uncompressed routed here
         };
         out.extend_from_slice(&decoded);
         src = end;

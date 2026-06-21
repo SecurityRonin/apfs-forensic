@@ -193,6 +193,53 @@ fn decodes_uncompressed_resource_fork_type10() {
 }
 
 #[test]
+fn decodes_lzfse_resource_fork_type12() {
+    // One LZFSE-compressed chunk (< CHUNK_SIZE) in a chunked resource fork.
+    let data: Vec<u8> = (0..50_000).map(|i| (i % 64) as u8).collect();
+    let mut chunk = Vec::new();
+    lzfse_rust::encode_bytes(&data, &mut chunk).unwrap();
+    let fork = chunked_fork(&[chunk]);
+    let hdr = header(12, data.len() as u64);
+    assert_eq!(
+        decompress_decmpfs(&hdr, Some(&fork)).expect("type 12"),
+        data
+    );
+}
+
+#[test]
+fn chunked_fork_stops_at_uncompressed_size_with_padding_slots() {
+    // A fork whose end-offset table over-allocates (an extra zero-padding slot
+    // beyond the real chunks) must stop once `uncompressed_size` bytes are
+    // produced, never reading the padding slot.
+    let data: Vec<u8> = (0..30_000).map(|i| (i % 97) as u8).collect();
+    let mut chunk = Vec::new();
+    lzfse_rust::encode_bytes(&data, &mut chunk).unwrap();
+    // header_size for 2 slots (one real chunk + one padding), then end-offsets.
+    let header_size = 4 * 3; // 1 headerSize word + 2 slots
+    let mut fork = (header_size as u32).to_le_bytes().to_vec();
+    let end = header_size + chunk.len();
+    fork.extend_from_slice(&(end as u32).to_le_bytes()); // real chunk end
+    fork.extend_from_slice(&0u32.to_le_bytes()); // padding slot (never read)
+    fork.extend_from_slice(&chunk);
+    let hdr = header(12, data.len() as u64);
+    assert_eq!(decompress_decmpfs(&hdr, Some(&fork)).expect("padded"), data);
+}
+
+#[test]
+fn rejects_chunked_fork_backward_offset() {
+    // An end-offset that goes backward (< the running source position) is a
+    // malformed fork — refuse, never over-read.
+    let header_size = 4 * 2; // 1 headerSize + 1 slot
+    let mut fork = (header_size as u32).to_le_bytes().to_vec();
+    fork.extend_from_slice(&0u32.to_le_bytes()); // end-offset 0 < src (8)
+    let hdr = header(8, 100);
+    assert!(matches!(
+        decompress_decmpfs(&hdr, Some(&fork)),
+        Err(apfs_core::ApfsError::Decmpfs(_))
+    ));
+}
+
+#[test]
 fn decodes_zlib_resource_fork_type4() {
     use flate2::{write::ZlibEncoder, Compression};
     use std::io::Write;
