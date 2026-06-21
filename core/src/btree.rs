@@ -237,3 +237,115 @@ pub fn node_entries(block: &[u8], subtype: BTreeSubtype) -> Vec<Entry<'_>> {
     }
     out
 }
+
+/// Depth cap on a root→leaf descent (cyclic-oid / malformed-tree guard).
+const MAX_BTREE_DEPTH: usize = 64;
+
+/// Walk a physically-stored B-tree from its root block, invoking `visit` for
+/// every **leaf** (key, value) entry. Index nodes are descended by their child
+/// block numbers; each node's Fletcher-64 checksum is verified before its TOC is
+/// trusted, the descent depth is capped (`MAX_BTREE_DEPTH`), and a visited-set
+/// guards against revisiting a block (cyclic-oid defense). The container omap
+/// tree is stored physically, so `root_paddr` and every child block number are
+/// direct block addresses.
+///
+/// # Errors
+/// [`crate::ApfsError::ChecksumMismatch`] for a node whose checksum fails;
+/// [`crate::ApfsError::CycleGuard`] on a cycle or an over-deep tree;
+/// [`crate::ApfsError::Io`] on a read/seek failure.
+pub fn for_each_leaf_entry<R, F>(
+    reader: &mut R,
+    root_paddr: u64,
+    block_size: usize,
+    subtype: BTreeSubtype,
+    visit: &mut F,
+) -> crate::Result<()>
+where
+    R: std::io::Read + std::io::Seek,
+    F: FnMut(&[u8], &[u8]),
+{
+    let mut visited = std::collections::HashSet::new();
+    descend(
+        reader,
+        root_paddr,
+        block_size,
+        subtype,
+        0,
+        &mut visited,
+        visit,
+    )
+}
+
+fn descend<R, F>(
+    reader: &mut R,
+    paddr: u64,
+    block_size: usize,
+    subtype: BTreeSubtype,
+    depth: usize,
+    visited: &mut std::collections::HashSet<u64>,
+    visit: &mut F,
+) -> crate::Result<()>
+where
+    R: std::io::Read + std::io::Seek,
+    F: FnMut(&[u8], &[u8]),
+{
+    if depth >= MAX_BTREE_DEPTH {
+        return Err(crate::ApfsError::CycleGuard {
+            cap: MAX_BTREE_DEPTH,
+        });
+    }
+    // A block visited twice is a cycle — reject rather than loop forever.
+    if !visited.insert(paddr) {
+        return Err(crate::ApfsError::CycleGuard {
+            cap: MAX_BTREE_DEPTH,
+        });
+    }
+
+    let mut buf = vec![0u8; block_size];
+    let Some(offset) = paddr.checked_mul(block_size as u64) else {
+        return Ok(()); // cov:unreachable: in-image paddr*bs cannot overflow u64
+    };
+    reader.seek(std::io::SeekFrom::Start(offset))?;
+    reader.read_exact(&mut buf)?;
+
+    // Checksum-before-trust: never read a node's TOC until its cksum validates.
+    let stored = crate::object::fletcher64_stored(&buf);
+    let computed = crate::object::fletcher64_checksum(&buf);
+    if stored != computed {
+        let block = crate::object::ObjPhys::parse(&buf).map_or(paddr, |h| h.oid);
+        return Err(crate::ApfsError::ChecksumMismatch {
+            block,
+            stored,
+            computed,
+        });
+    }
+
+    let Some(hdr) = parse_node_header(&buf) else {
+        return Ok(()); // cov:unreachable: buf is block_size >= node header length
+    };
+
+    if hdr.is_leaf() {
+        for e in node_entries(&buf, subtype) {
+            visit(e.key, e.value);
+        }
+        return Ok(());
+    }
+
+    // Index node: each value is an 8-byte child block number; descend each.
+    let children: Vec<u64> = node_entries(&buf, subtype)
+        .iter()
+        .map(|e| crate::bytes::le_u64(e.value, 0))
+        .collect();
+    for child in children {
+        descend(
+            reader,
+            child,
+            block_size,
+            subtype,
+            depth + 1,
+            visited,
+            visit,
+        )?;
+    }
+    Ok(())
+}
