@@ -1,0 +1,22 @@
+# cargo-deny configuration — supply-chain and licence gate.
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+
+# Apache-2.0 crate; permit only permissive, non-copyleft licences in the tree.
+# (The LGPL/GPL/AGPL APFS references — libfsapfs, apfs-fuse, apfsprogs,
+# dissect.apfs — are external ORACLES run as separate binaries, never linked,
+# so they never enter this dependency graph.)
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "Unicode-3.0", "ISC", "Zlib"]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

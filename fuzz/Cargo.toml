@@ -1,0 +1,62 @@
+[package]
+name = "apfs-forensic-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Standalone workspace: the fuzz crate must not be pulled into the parent
+# (core/forensic) workspace, whose virtual root manifest is not a package.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+# One target per parsed structure; the fuzzed structures are the reader's, so
+# they live in apfs-core. `fuzz_forensic` drives the full audit pipeline.
+[dependencies.apfs-core]
+path = "../core"
+
+[dependencies.apfs-forensic]
+path = "../forensic"
+
+[[bin]]
+name = "object"
+path = "fuzz_targets/object.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nx_superblock"
+path = "fuzz_targets/nx_superblock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "btree_node"
+path = "fuzz_targets/btree_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fsrecord"
+path = "fuzz_targets/fsrecord.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_forensic"
+path = "fuzz_targets/fuzz_forensic.rs"
+test = false
+doc = false
+bench = false
+
+# Further targets to add as parsers land (design §5):
+#   checkpoint, omap, inode, dir, extent, xattr, snapshot, spaceman, keybag,
+#   integrity_meta — each invariant: "must not panic".

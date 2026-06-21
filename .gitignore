@@ -1,0 +1,6 @@
+/target
+/tools
+/tests/data/*.dmg
+/tests/data/*.sparseimage
+/tests/data/*.img
+!/tests/data/README.md

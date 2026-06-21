@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = ["core", "forensic"]
+
+# Single source of truth for fields shared (identical) by every member (DRY).
+# `version` is NOT hoisted: core and forensic are versioned independently, so
+# each keeps its own `version` inline.
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"          # low, CI-verified MSRV — these are published libraries
+license = "Apache-2.0"
+repository = "https://github.com/SecurityRonin/apfs-forensic"
+homepage = "https://github.com/SecurityRonin/apfs-forensic"
+authors = ["Albert Hui <albert@securityronin.com>"]
+categories = ["parser-implementations", "filesystem"]
+readme = "README.md"
+
+# Single source of truth for dependency versions (DRY): declare each once;
+# members write `dep.workspace = true`. The inter-crate `apfs-core` version
+# lives here too, so a bump touches one line instead of every member.
+[workspace.dependencies]
+# Reader crate published as `apfs-core` with `[lib] name = "apfs_core"` so the
+# import path does not collide with the unrelated third-party `apfs` crate.
+apfs-core = { path = "core", version = "0.1.0", package = "apfs-core" }
+# KNOWLEDGE layer: magics, type codes, decmpfs map, and the shared report model.
+forensicnomicon = "0.5"
+thiserror = "2"
+bitflags = "2"
+chrono = "0.4"
+# decmpfs transparent-compression codec stack (REUSE — see hfsplus-forensic):
+#   zlib/DEFLATE (types 3/4), LZVN (types 7/8, length-tolerant), LZFSE (types 11/12).
+# All pure-Rust, keeping `unsafe_code = "forbid"` intact.
+flate2 = "1"
+lzfse_rust = "0.2"
+lzvn = "0.1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all                      = { level = "warn", priority = -1 }
+pedantic                 = { level = "warn", priority = -1 }
+correctness              = { level = "deny", priority = -1 }
+suspicious               = { level = "deny", priority = -1 }
+unwrap_used              = { level = "deny", priority = 0 }
+expect_used              = { level = "deny", priority = 0 }
+module_name_repetitions  = { level = "allow", priority = 1 }
+must_use_candidate       = { level = "allow", priority = 1 }
+missing_errors_doc       = { level = "allow", priority = 1 }
+missing_panics_doc       = { level = "allow", priority = 1 }
+cast_possible_truncation = { level = "allow", priority = 1 }
+cast_possible_wrap       = { level = "allow", priority = 1 }
+cast_sign_loss           = { level = "allow", priority = 1 }
+cast_precision_loss      = { level = "allow", priority = 1 }
+too_many_lines           = { level = "allow", priority = 1 }
+items_after_statements   = { level = "allow", priority = 1 }
+similar_names            = { level = "allow", priority = 1 }
+manual_let_else          = { level = "allow", priority = 1 }

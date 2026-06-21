@@ -1,0 +1,22 @@
+[package]
+name = "apfs-forensic"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "APFS (Apple File System) anomaly auditor — graded forensic findings over apfs-core: snapshot/checkpoint tampering, sealed-volume integrity, recoverable deleted records, object-map inconsistency, clone/dedup and encryption-state analysis"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/apfs-forensic"
+readme.workspace = true
+authors.workspace = true
+keywords = ["forensics", "apfs", "dfir", "macos", "anomaly"]
+categories.workspace = true
+
+[dependencies]
+apfs-core = { workspace = true }
+forensicnomicon = { workspace = true }   # the shared report model (Severity/Observation/Finding)
+chrono = { workspace = true }
+
+[lints]
+workspace = true
