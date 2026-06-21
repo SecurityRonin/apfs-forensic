@@ -8,7 +8,7 @@
 //!                                       user.note="second custom attr"
 //!   /compressed.txt   inode 23  xattrs: com.apple.decmpfs (embedded header,
 //!                                       type 8), com.apple.ResourceFork (stream)
-//!   /symlink_to_beth  inode 29  com.apple.fs.symlink -> "Dir1/Beth.txt"
+//!   `/symlink_to_beth`  inode 29  com.apple.fs.symlink -> "Dir1/Beth.txt"
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::Cursor;
@@ -102,7 +102,7 @@ fn compressed_file_carries_decmpfs_and_resource_fork() {
             assert_eq!(u32::from_le_bytes(b[4..8].try_into().unwrap()), 8, "type 8");
             assert_eq!(
                 u64::from_le_bytes(b[8..16].try_into().unwrap()),
-                180000,
+                180_000,
                 "uncompressed_size"
             );
         }

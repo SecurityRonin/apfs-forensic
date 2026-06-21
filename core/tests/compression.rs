@@ -4,7 +4,7 @@
 //! macOS `ditto --hfsCompression` heuristic did not produce on this corpus.
 //!
 //! Ground truth: `/compressed.txt` (inode 23) is a `decmpfs` **type-8 LZVN
-//! resource-fork** file, uncompressed_size 180000, whose macOS-read content has
+//! resource-fork** file, `uncompressed_size` 180000, whose macOS-read content has
 //! SHA-256 `3f58a418…`. The resource fork (dstream oid 24, 1526 B) holds three
 //! LZVN chunks (end-offsets 560/1104/1526). This is the macOS default and the
 //! exact case hfsplus-forensic validated 25/25 on real data.
@@ -28,10 +28,11 @@ fn volume() -> ApfsVolume {
 }
 
 fn sha256_hex(data: &[u8]) -> String {
-    Sha256::digest(data)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    use std::fmt::Write;
+    Sha256::digest(data).iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// The decmpfs 16-byte header for a given type + uncompressed size.
@@ -59,7 +60,7 @@ fn reads_compressed_file_byte_identical() {
     let vol = volume();
     let inode = open_path(&mut r, &vol, "/compressed.txt", BLOCK_SIZE).expect("open compressed");
     let bytes = read_data(&mut r, &vol, &inode, BLOCK_SIZE).expect("decode compressed");
-    assert_eq!(bytes.len(), 180000, "uncompressed size");
+    assert_eq!(bytes.len(), 180_000, "uncompressed size");
     assert_eq!(
         sha256_hex(&bytes),
         "3f58a41850c1096de883ada14c98c2375a85b473c80ccbef03c9e72c113abc78",
@@ -149,9 +150,9 @@ fn decodes_inline_lzfse_type11() {
 fn decodes_real_type8_lzvn_resource_fork_direct() {
     // The real resource fork carved from the fixture (dstream 24, block 378).
     let fork = &CONTENT[378 * BLOCK_SIZE..378 * BLOCK_SIZE + 1526];
-    let hdr = header(8, 180000);
+    let hdr = header(8, 180_000);
     let out = decompress_decmpfs(&hdr, Some(fork)).expect("real LZVN fork");
-    assert_eq!(out.len(), 180000);
+    assert_eq!(out.len(), 180_000);
     assert_eq!(
         sha256_hex(&out),
         "3f58a41850c1096de883ada14c98c2375a85b473c80ccbef03c9e72c113abc78"

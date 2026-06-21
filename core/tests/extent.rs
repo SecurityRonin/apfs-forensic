@@ -26,8 +26,11 @@ fn volume() -> ApfsVolume {
 }
 
 fn sha256_hex(data: &[u8]) -> String {
-    let digest = Sha256::digest(data);
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write;
+    Sha256::digest(data).iter().fold(String::new(), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 #[test]
