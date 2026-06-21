@@ -96,6 +96,11 @@ pub enum ApfsError {
     /// A tree walk exceeded the cycle-guard depth (malicious/cyclic oid graph).
     #[error("tree walk exceeded depth cap {cap} (possible cyclic object graph)")]
     CycleGuard { cap: usize },
+    /// The checkpoint descriptor or data area is stored as a B-tree (high bit of
+    /// `nx_xp_{desc,data}_blocks` set), which needs B-tree resolution not yet
+    /// implemented — fail loud rather than mis-read a tree oid as a base address.
+    #[error("checkpoint {area} area is tree-backed; B-tree resolution not yet implemented")]
+    CheckpointTreeUnsupported { area: &'static str },
 }
 
 /// Result alias for the crate.
