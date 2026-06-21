@@ -26,6 +26,15 @@ pub(crate) fn le_u64(data: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(b)
 }
 
+/// Copy the `N`-byte array at `offset`; zero-filled where it runs past `data`.
+pub(crate) fn arr<const N: usize>(data: &[u8], offset: usize) -> [u8; N] {
+    let mut b = [0u8; N];
+    if let Some(s) = data.get(offset..offset + N) {
+        b.copy_from_slice(s);
+    }
+    b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -35,6 +44,7 @@ mod tests {
         let d = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
         assert_eq!(le_u32(&d, 0), 0x0403_0201);
         assert_eq!(le_u64(&d, 0), 0x0807_0605_0403_0201);
+        assert_eq!(arr::<4>(&d, 2), [0x03, 0x04, 0x05, 0x06]);
     }
 
     #[test]
@@ -42,11 +52,13 @@ mod tests {
         let d = [0xAAu8; 3];
         assert_eq!(le_u32(&d, 0), 0);
         assert_eq!(le_u64(&d, 0), 0);
+        assert_eq!(arr::<8>(&d, 0), [0u8; 8]);
     }
 
     #[test]
     fn offset_past_end_yields_zero() {
         let d = [0x11u8, 0x22];
         assert_eq!(le_u32(&d, 100), 0);
+        assert_eq!(arr::<2>(&d, 100), [0u8; 2]);
     }
 }

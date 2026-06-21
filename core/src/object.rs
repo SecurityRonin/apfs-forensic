@@ -23,6 +23,13 @@
 /// Size in bytes of the `obj_phys_t` header.
 pub const OBJ_PHYS_LEN: usize = 32;
 
+/// Read the stored Fletcher-64 checksum (`o_cksum`, the first 8 bytes of an
+/// object). Bounds-checked: `0` if the block is shorter than 8 bytes.
+#[must_use]
+pub fn fletcher64_stored(block: &[u8]) -> u64 {
+    crate::bytes::le_u64(block, 0)
+}
+
 /// A parsed object header.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
