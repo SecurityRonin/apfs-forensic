@@ -55,7 +55,7 @@ pub enum AnomalyKind {
     /// non-latest checkpoint (normal copy-on-write residue).
     CheckpointSupersededState { xid: u64 },
     /// `APFS-SNAPSHOT-XID-DISORDER` (Info) — snapshot xids inconsistent with
-    /// create_time ordering.
+    /// `create_time` ordering.
     SnapshotXidDisorder { xid: u64 },
     /// `APFS-SNAPSHOT-MISSING-METADATA` — snap-name without snap-metadata (or
     /// vice-versa).
@@ -91,11 +91,11 @@ pub enum AnomalyKind {
     EncryptionKeybagAnomaly { raw_tag: u8, offset: u64 },
     /// `APFS-TIMESTAMP-ZEROED` (Info) — one timestamp 0 while siblings are set.
     TimestampZeroed { inode: u64 },
-    /// `APFS-TIMESTAMP-ORDER` (Info) — change_time < create_time, etc. (FP-prone).
+    /// `APFS-TIMESTAMP-ORDER` (Info) — `change_time` < `create_time`, etc. (FP-prone).
     TimestampOrder { inode: u64 },
     /// `APFS-XID-REUSE` — two live objects claim the same (oid, xid).
     XidReuse { oid: u64, xid: u64 },
-    /// `APFS-ORPHAN-INODE` (Low) — inode with no referencing DIR_REC.
+    /// `APFS-ORPHAN-INODE` (Low) — inode with no referencing `DIR_REC`.
     OrphanInode { oid: u64 },
     /// `APFS-VOLUME-ROLE-MISMATCH` (Info) — volume role flag inconsistent with
     /// content.

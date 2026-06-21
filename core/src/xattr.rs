@@ -8,7 +8,7 @@
 //! - `com.apple.ResourceFork` — resource fork / non-embedded compressed payload.
 //! - `com.apple.fs.symlink` / symlink target (a symlink's target is its data
 //!   stream, but related metadata appears in xattrs).
-//! - quarantine, FinderInfo, security.* (provenance leads).
+//! - quarantine, `FinderInfo`, security.* (provenance leads).
 
 /// `XATTR_DATA_EMBEDDED` flag (data inline in the record).
 pub const XATTR_DATA_EMBEDDED: u16 = 0x0002;

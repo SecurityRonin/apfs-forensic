@@ -14,7 +14,7 @@
 //! Per-file crypto state is `APFS_TYPE_CRYPTO_STATE 7` (`j_crypto_val_t` with a
 //! `wrapped_meta_crypto_state_t`). This module **reports** what is present —
 //! locked/unlocked, which tags, hint presence — and, only when a key/passphrase
-//! is *supplied*, unwraps via a vetted crate (RustCrypto AES/HMAC/PBKDF2,
+//! is *supplied*, unwraps via a vetted crate (`RustCrypto` AES/HMAC/PBKDF2,
 //! AES-XTS). With no key it **refuses** to return plaintext; it never fabricates.
 
 /// Keybag tag values.

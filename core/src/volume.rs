@@ -46,7 +46,7 @@ impl ApfsVolume {
         todo!("P3")
     }
 
-    /// Resolve a path (`/a/b/c`) to an inode via DIR_REC navigation.
+    /// Resolve a path (`/a/b/c`) to an inode via `DIR_REC` navigation.
     ///
     /// # Errors
     /// Returns an error if any path component is not found.

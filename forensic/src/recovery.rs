@@ -6,7 +6,7 @@
 //! the spaceman bitmap (a *candidate*, NOT a recoverability guarantee: TRIM,
 //! encryption, zeroing, and reuse races intervene — content must be validated);
 //! `APFS-REAPER-PENDING-OBJECT` (Low) — object queued in the reaper;
-//! `APFS-ORPHAN-INODE` (Low) — inode with no referencing DIR_REC.
+//! `APFS-ORPHAN-INODE` (Low) — inode with no referencing `DIR_REC`.
 //!
 //! Validated against an INDEPENDENT oracle (real images / pre-delete capture +
 //! apfsck), not only records we deleted ourselves.

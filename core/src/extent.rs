@@ -12,7 +12,7 @@
 //!
 //! `read_data` assembles extents in logical order into plaintext bytes; if the
 //! inode carries a `com.apple.decmpfs` xattr, [`crate::compression`] is applied
-//! transparently instead (the FILE_EXTENT path holds the resource-fork payload
+//! transparently instead (the `FILE_EXTENT` path holds the resource-fork payload
 //! for non-embedded compression).
 
 /// Mask for the extent length within `len_and_flags`.

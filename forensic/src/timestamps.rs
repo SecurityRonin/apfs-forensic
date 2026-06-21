@@ -1,7 +1,7 @@
 //! Timestamp anomaly leads (deliberately Info — FP-prone).
 //!
 //! `APFS-TIMESTAMP-ZEROED` (Info) — one of create/mod/change/access is 0 while
-//! siblings are set; `APFS-TIMESTAMP-ORDER` (Info) — change_time < create_time
+//! siblings are set; `APFS-TIMESTAMP-ORDER` (Info) — `change_time` < `create_time`
 //! or access predating create. Like ntfs-forensic's timestomp detector, these
 //! are deliberately Info: timestamps are `uint64_t` ns-since-epoch and zero is a
 //! contextual lead, not a spec sentinel, so they are leads for the examiner, not
