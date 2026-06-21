@@ -34,6 +34,8 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod bytes;
+
 pub mod btree;
 pub mod checkpoint;
 pub mod compression;

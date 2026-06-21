@@ -42,9 +42,21 @@ pub struct ObjPhys {
 impl ObjPhys {
     /// Parse a header from the start of `block`. Bounds-checked; returns `None`
     /// if the slice is too short (never panics).
+    ///
+    /// Layout (Apple `obj_phys_t`, little-endian on disk): `o_cksum[8]` @0,
+    /// `o_oid` u64 @8, `o_xid` u64 @16, `o_type` u32 @24, `o_subtype` u32 @28.
     #[must_use]
-    pub fn parse(_block: &[u8]) -> Option<Self> {
-        todo!("P1: bounds-checked decode of the 32-byte obj_phys_t header")
+    pub fn parse(block: &[u8]) -> Option<Self> {
+        if block.len() < OBJ_PHYS_LEN {
+            return None;
+        }
+        Some(Self {
+            cksum: crate::bytes::le_u64(block, 0),
+            oid: crate::bytes::le_u64(block, 8),
+            xid: crate::bytes::le_u64(block, 16),
+            obj_type_raw: crate::bytes::le_u32(block, 24),
+            subtype: crate::bytes::le_u32(block, 28),
+        })
     }
 
     /// The object type after masking off storage/flag bits
@@ -63,6 +75,32 @@ impl ObjPhys {
 /// object test vectors + apfsck** before being trusted (a wrong implementation
 /// would make every block fail verification).
 #[must_use]
-pub fn fletcher64_checksum(_block: &[u8]) -> u64 {
-    todo!("P1: Fletcher-64 with the documented APFS folding; verify vs real objects")
+pub fn fletcher64_checksum(block: &[u8]) -> u64 {
+    // APFS Fletcher-64 (Apple names the algorithm; the modular steps follow the
+    // libfsapfs formulation and are validated against a real Apple-stored
+    // o_cksum in core/tests/object.rs):
+    //   - iterate the object as 32-bit little-endian words,
+    //   - treat the 8-byte o_cksum field (the first two words) as zero,
+    //   - accumulate two running sums modulo 0xffffffff,
+    //   - fold into the lower then upper 32 bits.
+    const MOD: u64 = 0xffff_ffff;
+    let mut sum_lo: u64 = 0;
+    let mut sum_hi: u64 = 0;
+
+    // chunks_exact yields only whole 4-byte words; a trailing partial word
+    // (malformed/odd-length input) is ignored — never indexed, never panics.
+    for (i, word) in block.chunks_exact(4).enumerate() {
+        // word is exactly 4 bytes from chunks_exact, so the conversion is total.
+        let v = if i < 2 {
+            0 // the o_cksum field is excluded from its own checksum
+        } else {
+            u64::from(u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+        };
+        sum_lo = (sum_lo + v) % MOD;
+        sum_hi = (sum_hi + sum_lo) % MOD;
+    }
+
+    let check_lo = MOD - ((sum_lo + sum_hi) % MOD);
+    let check_hi = MOD - ((sum_lo + check_lo) % MOD);
+    (check_hi << 32) | check_lo
 }
