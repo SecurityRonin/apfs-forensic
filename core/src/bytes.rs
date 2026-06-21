@@ -8,6 +8,15 @@
 //! field decode. Mirrors `ntfs-core`'s `bytes.rs`; helpers are added as each
 //! phase needs them.
 
+/// Read a little-endian `u16` at `offset`; `0` if it would run past `data`.
+pub(crate) fn le_u16(data: &[u8], offset: usize) -> u16 {
+    let mut b = [0u8; 2];
+    if let Some(s) = data.get(offset..offset + 2) {
+        b.copy_from_slice(s);
+    }
+    u16::from_le_bytes(b)
+}
+
 /// Read a little-endian `u32` at `offset`; `0` if it would run past `data`.
 pub(crate) fn le_u32(data: &[u8], offset: usize) -> u32 {
     let mut b = [0u8; 4];
