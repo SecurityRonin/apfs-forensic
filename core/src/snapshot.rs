@@ -149,6 +149,25 @@ pub fn resolve_snapshot_xid<R: Read + Seek>(
     Ok(found)
 }
 
+/// Mount a snapshot as a point-in-time [`ApfsVolume`]: read the volume
+/// superblock (APSB) frozen at `snapshot.sblock_oid` and parse it. The returned
+/// volume carries the snapshot's own omap, root fs-tree oid, and xid, so the
+/// existing [`crate::dir`] / [`crate::extent`] navigation reads the volume
+/// exactly as it stood at snapshot time — the volume omap resolves fs-tree oids
+/// picking the entry with `ok_xid` ≤ the snapshot's xid.
+///
+/// # Errors
+/// [`crate::ApfsError::UnexpectedObjectType`] if `sblock_oid` does not point at a
+/// volume superblock; [`crate::ApfsError::ChecksumMismatch`] on a Fletcher-64
+/// failure; [`crate::ApfsError::Io`] on a read/seek failure.
+pub fn mount_snapshot<R: Read + Seek>(
+    _reader: &mut R,
+    _snapshot: &Snapshot,
+    _block_size: usize,
+) -> crate::Result<ApfsVolume> {
+    todo!("P5 unit 3: read sblock_oid APSB as a point-in-time ApfsVolume")
+}
+
 /// Walk the snapshot-metadata tree, invoking `visit(key, value)` for every leaf
 /// record (both `SNAP_METADATA` and `SNAP_NAME`). The root is read by its
 /// physical block address ([`ApfsVolume::snap_meta_tree_oid`]); index-node
@@ -379,5 +398,64 @@ mod tests {
         overlong.extend_from_slice(&200u16.to_le_bytes());
         overlong.extend_from_slice(b"z");
         assert_eq!(decode_snap_name_key(&overlong), None);
+    }
+
+    // The point-in-time seam: a snapshot's sblock_oid is a *physical* APSB block
+    // number, so mount_snapshot must read that block and parse it as an
+    // ApfsVolume identical to parsing the block directly. Validated against the
+    // real Apple-minted P4 fixture's live APSB (block 438) — a Snapshot whose
+    // sblock_oid points at it must "mount" to the same volume the existing
+    // navigation already reads.
+    const P4_CONTENT: &[u8] = include_bytes!("../../tests/data/apfs_content.bin");
+    const P4_BLOCK_SIZE: usize = 4096;
+    const P4_APSB_BLOCK: u64 = 438;
+
+    fn snapshot_pointing_at(sblock_oid: u64) -> Snapshot {
+        Snapshot {
+            xid: 0,
+            name: "synthetic-pointer".to_string(),
+            create_time: 0,
+            change_time: 0,
+            sblock_oid,
+            extentref_tree_oid: 0,
+            inum: 0,
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn mount_snapshot_reads_sblock_as_volume() {
+        use std::io::Cursor;
+        let mut r = Cursor::new(P4_CONTENT);
+        // A snapshot whose sblock_oid is the live APSB block 438.
+        let snap = snapshot_pointing_at(P4_APSB_BLOCK);
+        let mounted = mount_snapshot(&mut r, &snap, P4_BLOCK_SIZE).expect("mount snapshot");
+
+        // The "mounted" volume must equal a direct parse of block 438 — same
+        // omap, root tree, xid, and name. This is the point-in-time seam: an
+        // sblock_oid resolves to a full navigable ApfsVolume.
+        let start = P4_APSB_BLOCK as usize * P4_BLOCK_SIZE;
+        let direct = ApfsVolume::parse(&P4_CONTENT[start..start + P4_BLOCK_SIZE])
+            .expect("parse APSB directly");
+        assert_eq!(mounted.oid(), direct.oid());
+        assert_eq!(mounted.xid(), direct.xid());
+        assert_eq!(mounted.omap_oid(), direct.omap_oid());
+        assert_eq!(mounted.root_tree_oid(), direct.root_tree_oid());
+        assert_eq!(mounted.name(), direct.name());
+        assert_eq!(mounted.name(), "APFSP4");
+    }
+
+    #[test]
+    fn mount_snapshot_rejects_non_apsb_block() {
+        use std::io::Cursor;
+        let mut r = Cursor::new(P4_CONTENT);
+        // Block 0 is the container superblock (NXSB), not a volume APSB; mounting
+        // it must fail loudly with UnexpectedObjectType, never silently succeed.
+        let snap = snapshot_pointing_at(0);
+        let err = mount_snapshot(&mut r, &snap, P4_BLOCK_SIZE).unwrap_err();
+        assert!(
+            matches!(err, crate::ApfsError::UnexpectedObjectType { .. }),
+            "mounting a non-APSB block must fail loudly, got {err:?}"
+        );
     }
 }
