@@ -32,7 +32,13 @@ chrono = "0.4"
 # All pure-Rust, keeping `unsafe_code = "forbid"` intact.
 flate2 = "1"
 lzfse_rust = "0.2"
-lzvn = "0.1"
+# Length-tolerant LZVN decoder — OUR fleet crate (SecurityRonin `lzvn-core`,
+# `[lib] name = "lzvn"`), the one hfsplus-forensic validated 25/25 on real macOS
+# Tahoe data. The bare `lzvn` crate on crates.io is an unrelated third party
+# (Reverier-Xu) with a `decode_raw` API and no decmpfs trailing-byte tolerance.
+lzvn = { version = "0.1", package = "lzvn-core" }
+# Test-only: SHA-256 for the byte-identical macOS `cp` oracle reconciliation.
+sha2 = "0.10"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
