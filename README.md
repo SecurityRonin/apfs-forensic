@@ -8,7 +8,6 @@
 [![Sponsor](https://img.shields.io/badge/sponsor-h4x0r-ea4aaa?logo=github-sponsors)](https://github.com/sponsors/h4x0r)
 
 [![CI](https://github.com/SecurityRonin/apfs-forensic/actions/workflows/ci.yml/badge.svg)](https://github.com/SecurityRonin/apfs-forensic/actions)
-[![Coverage](https://img.shields.io/badge/coverage-100%25%20lines-brightgreen.svg)](docs/validation.md)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/rust-secure-code/safety-dance)
 [![Security advisories](https://img.shields.io/badge/advisories-clean-success.svg)](deny.toml)
 
