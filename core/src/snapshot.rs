@@ -161,11 +161,15 @@ pub fn resolve_snapshot_xid<R: Read + Seek>(
 /// volume superblock; [`crate::ApfsError::ChecksumMismatch`] on a Fletcher-64
 /// failure; [`crate::ApfsError::Io`] on a read/seek failure.
 pub fn mount_snapshot<R: Read + Seek>(
-    _reader: &mut R,
-    _snapshot: &Snapshot,
-    _block_size: usize,
+    reader: &mut R,
+    snapshot: &Snapshot,
+    block_size: usize,
 ) -> crate::Result<ApfsVolume> {
-    todo!("P5 unit 3: read sblock_oid APSB as a point-in-time ApfsVolume")
+    let mut buf = vec![0u8; block_size];
+    let offset = snapshot.sblock_oid.saturating_mul(block_size as u64);
+    reader.seek(std::io::SeekFrom::Start(offset))?;
+    reader.read_exact(&mut buf)?;
+    ApfsVolume::parse(&buf)
 }
 
 /// Walk the snapshot-metadata tree, invoking `visit(key, value)` for every leaf
