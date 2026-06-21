@@ -5,7 +5,7 @@
 //! fixture and **cross-checked against TSK `istat`** (timestamps, mode, uid/gid,
 //! nchildren) — see `tests/data/README.md` and `docs/validation.md`. The
 //! authoritative offsets: parent@0, private@8, create@16, mod@24, change@32,
-//! access@40, internal_flags@48, nchildren/nlink@56, bsd_flags@68, owner@72,
+//! access@40, `internal_flags`@48, nchildren/nlink@56, `bsd_flags`@68, owner@72,
 //! gid@76, mode@80, xfields@92.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -61,7 +61,7 @@ fn parse_beth_txt_inode_metadata() {
     assert_eq!(inode.parent_id, 18);
     assert_eq!(inode.name.as_deref(), Some("Beth.txt"));
     assert_eq!(inode.size, Some(38));
-    assert_eq!(inode.mode, 0o100644);
+    assert_eq!(inode.mode, 0o100_644);
     assert_eq!(inode.uid, 99);
     assert_eq!(inode.gid, 99);
     assert_eq!(inode.nlink_or_nchildren, 1);
@@ -72,7 +72,7 @@ fn parse_root_dir_inode_metadata() {
     // inode 2 = root dir. TSK istat: mode 0040755, uid/gid 501/20, children 3.
     let v = inode_value(2);
     let inode = Inode::parse(2, &v).expect("parse root inode");
-    assert_eq!(inode.mode, 0o040755);
+    assert_eq!(inode.mode, 0o040_755);
     assert_eq!(inode.uid, 501);
     assert_eq!(inode.gid, 20);
     assert_eq!(inode.nlink_or_nchildren, 3);
@@ -114,8 +114,10 @@ fn ns_to_datetime_zero_is_epoch() {
 
 #[test]
 fn ns_to_datetime_handles_huge_value() {
-    // A value beyond chrono's representable range must yield None, never panic.
-    assert!(ns_to_datetime(u64::MAX).is_none());
+    // u64::MAX ns is ~year 2554 — within chrono's range, so it decodes rather
+    // than panicking. The point is graceful handling of an extreme value.
+    let dt = ns_to_datetime(u64::MAX).expect("u64::MAX ns is representable");
+    assert!(dt.timestamp() > 0);
 }
 
 #[test]
