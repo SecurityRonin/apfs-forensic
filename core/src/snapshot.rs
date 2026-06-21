@@ -25,6 +25,10 @@
 
 use std::io::{Read, Seek};
 
+use crate::btree::{self, BTreeSubtype};
+use crate::fsrecord::{decode_jkey, RecordType};
+use crate::object::{fletcher64_checksum, fletcher64_stored, ObjPhys};
+use crate::omap::ObjectMap;
 use crate::volume::ApfsVolume;
 
 /// `o_subtype` of the snapshot-metadata tree (`OBJECT_TYPE_SNAPMETATREE`).
@@ -39,6 +43,9 @@ const OFF_SNAP_INUM: usize = 32;
 const OFF_SNAP_FLAGS: usize = 44;
 const OFF_SNAP_NAME_LEN: usize = 48;
 const OFF_SNAP_NAME: usize = 50;
+
+/// Depth cap on a snapshot-metadata-tree descent (cyclic-oid guard).
+const MAX_SNAP_TREE_DEPTH: usize = 64;
 
 /// Hard cap on a snapshot name length (incl. NUL) — a snapshot name is bounded;
 /// cap well above any legal name to reject an allocation-bomb `name_len`.
@@ -94,11 +101,147 @@ fn parse_snap_metadata(xid: u64, value: &[u8]) -> Snapshot {
 /// [`crate::ApfsError::OmapUnresolved`] / [`crate::ApfsError::Io`] on a
 /// structurally invalid tree or a read failure.
 pub fn list_snapshots<R: Read + Seek>(
-    _reader: &mut R,
-    _volume: &ApfsVolume,
-    _block_size: usize,
+    reader: &mut R,
+    volume: &ApfsVolume,
+    block_size: usize,
 ) -> crate::Result<Vec<Snapshot>> {
-    todo!("P5 unit 1: walk the snap-metadata tree and decode SNAP_METADATA records")
+    let mut out = Vec::new();
+    for_each_snap_record(reader, volume, block_size, &mut |key, value| {
+        let (xid, ty) = decode_jkey(crate::bytes::le_u64(key, 0));
+        if ty == Some(RecordType::SnapMetadata) {
+            out.push(parse_snap_metadata(xid, value));
+        }
+    })?;
+    out.sort_by_key(|s| s.xid);
+    Ok(out)
+}
+
+/// Walk the snapshot-metadata tree, invoking `visit(key, value)` for every leaf
+/// record (both `SNAP_METADATA` and `SNAP_NAME`). The root is read by its
+/// physical block address ([`ApfsVolume::snap_meta_tree_oid`]); index-node
+/// children are *virtual* oids resolved through the volume omap at the volume's
+/// xid (libfsapfs resolves snap-meta-tree sub-nodes via the object map),
+/// mirroring [`crate::dir`]'s fs-tree walk. Each node's Fletcher-64 checksum is
+/// verified before its TOC is trusted, the descent depth is capped, and a
+/// visited-set guards against cyclic node oids.
+fn for_each_snap_record<R, F>(
+    reader: &mut R,
+    volume: &ApfsVolume,
+    block_size: usize,
+    visit: &mut F,
+) -> crate::Result<()>
+where
+    R: Read + Seek,
+    F: FnMut(&[u8], &[u8]),
+{
+    // Read the volume omap header (a physical object at apfs_omap_oid) — needed
+    // to resolve any virtual sub-node oids of the snap-meta tree.
+    let mut buf = vec![0u8; block_size];
+    let omap_off = volume.omap_oid().saturating_mul(block_size as u64);
+    reader.seek(std::io::SeekFrom::Start(omap_off))?;
+    reader.read_exact(&mut buf)?;
+    let omap = ObjectMap::parse(&buf)?;
+
+    let mut visited = std::collections::HashSet::new();
+    descend_snap(
+        reader,
+        &omap,
+        volume.snap_meta_tree_oid(),
+        true,
+        volume.xid(),
+        block_size,
+        0,
+        &mut visited,
+        visit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn descend_snap<R, F>(
+    reader: &mut R,
+    omap: &ObjectMap,
+    node_oid: u64,
+    is_root: bool,
+    xid: u64,
+    block_size: usize,
+    depth: usize,
+    visited: &mut std::collections::HashSet<u64>,
+    visit: &mut F,
+) -> crate::Result<()>
+where
+    R: Read + Seek,
+    F: FnMut(&[u8], &[u8]),
+{
+    let cycle = || crate::ApfsError::CycleGuard {
+        cap: MAX_SNAP_TREE_DEPTH,
+    };
+    // The visited-set guard below dominates any realizable cycle; this depth cap
+    // is defense-in-depth against a pathological deep acyclic tree.
+    if depth >= MAX_SNAP_TREE_DEPTH {
+        return Err(cycle()); // cov:unreachable: visited-set guard dominates any realizable cycle
+    }
+    if !visited.insert(node_oid) {
+        return Err(cycle());
+    }
+
+    // The root is a direct block address; a sub-node is a virtual oid resolved
+    // through the volume omap.
+    let paddr = if is_root {
+        node_oid
+    } else {
+        omap.resolve(reader, node_oid, xid, block_size)?.paddr
+    };
+
+    let mut buf = vec![0u8; block_size];
+    let offset = paddr.saturating_mul(block_size as u64);
+    reader.seek(std::io::SeekFrom::Start(offset))?;
+    reader.read_exact(&mut buf)?;
+
+    // Checksum-before-trust.
+    let stored = fletcher64_stored(&buf);
+    let computed = fletcher64_checksum(&buf);
+    if stored != computed {
+        let block = ObjPhys::parse(&buf).map_or(paddr, |h| h.oid);
+        return Err(crate::ApfsError::ChecksumMismatch {
+            block,
+            stored,
+            computed,
+        });
+    }
+
+    let Some(hdr) = btree::parse_node_header(&buf) else {
+        return Ok(()); // cov:unreachable: buf is block_size >= node header length
+    };
+
+    // The snap-meta tree is a variable-KV tree (variable keys: 8-byte metadata
+    // key vs name key); its layout matches the fs-tree, so BTreeSubtype::FsTree
+    // supplies the right (variable-KV, 8-byte branch) entry geometry.
+    if hdr.is_leaf() {
+        for e in btree::node_entries(&buf, BTreeSubtype::FsTree) {
+            visit(e.key, e.value);
+        }
+        return Ok(());
+    }
+
+    // Index node: each value is an 8-byte child *virtual* oid; descend each.
+    let children: Vec<u64> = btree::node_entries(&buf, BTreeSubtype::FsTree)
+        .iter()
+        .map(|e| crate::bytes::le_u64(e.value, 0))
+        .collect();
+    for child in children {
+        descend_snap(
+            reader,
+            omap,
+            child,
+            false,
+            xid,
+            block_size,
+            depth + 1,
+            visited,
+            visit,
+        )?;
+    }
+    Ok(())
 }
 
 /// Decode a NUL-terminated UTF-8 byte string (the snapshot name form).

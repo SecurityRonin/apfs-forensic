@@ -12,8 +12,8 @@
 //!
 //!   * **`APFS_P5_FIXTURE`** (env-gated, a container *with* snapshots and a file
 //!     whose content changes between snapshots): validates the populated
-//!     snap-metadata list (names/xids/create_times) against `diskutil apfs
-//!     listSnapshots` / `fsapfsinfo`, the snap-name → xid resolution, and the
+//!     snap-metadata list (names, xids, create-times) against `diskutil apfs
+//!     listSnapshots` / `fsapfsinfo`, the snap-name to xid resolution, and the
 //!     **point-in-time read** (v1 bytes at snapshot 1's frozen APSB vs v2 at the
 //!     live APSB). Skips cleanly when the fixture is absent, like an oracle
 //!     binary (the snapshot-with-changing-file image needs the macOS snapshot
