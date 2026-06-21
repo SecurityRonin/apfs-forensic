@@ -1,7 +1,8 @@
 # Validation
 
-> **Status: planned.** This document specifies the validation strategy; results
-> are recorded here as each phase lands. No correctness is claimed yet.
+> **Status: phases P1–P4 validated (Tier 2).** Results are recorded here as each
+> phase lands; later phases (snapshots, spaceman, encryption, sealed) are still
+> in progress. Claims below are scoped to the validated capabilities and tiered.
 
 ## How to read the evidence tiers
 
@@ -121,3 +122,60 @@ fixture + TSK oracle.
 **Tier rationale:** independent oracle (TSK `fls`/`istat`, a separate C codebase)
 on a **self-minted** corpus ⇒ Tier 2. A Tier-1 lift needs the same navigation run
 on a real-world macOS image (env-gated, future work).
+
+### File byte read + decmpfs + xattr + symlink (P4) — Tier 2
+
+**Corpus:** `tests/data/apfs_content.bin` — the first **442 blocks** (1.73 MiB,
+4096-byte blocks) of a real APFS *container partition* minted by Apple's own
+`hdiutil` (`hdiutil create -size 128m -fs APFS -volname APFSP4 -layout GPTSPUD`),
+populated with **known content covering every read path**: a plain file, a
+**sparse** file (a 64 KiB hole + a tail extent), a **transparently-compressed**
+file (`ditto --hfsCompression` → decmpfs **type 8, LZVN, resource fork**), a file
+with **custom xattrs**, and a **symlink**. The carve reaches the full chain
+NXSB → checkpoint → container omap → live APSB (block 438, xid 14) → volume omap
+(433/434) → fs-tree leaf (block 432) **and** every file's data extents +
+resource fork (blocks 345–426). Provenance + MD5 in `tests/data/README.md`.
+
+**What is exercised** (`core/tests/{extent,compression,xattr}.rs`):
+
+| Claim | Evidence | Oracle |
+|---|---|---|
+| **plain-file extent assembly** | `/plain.txt` (35 B, single extent phys 347) reads back byte-identical | **macOS `shasum -a 256`** = `289af0a0…` (matches `read_data`) |
+| **sparse-hole handling** | `/sparse.bin` (69632 B): `FILE_EXTENT` records are a 64 KiB hole (`phys_block_num 0`) + a 4 KiB tail @65536; the hole reads back as zeroes | **macOS `cp`** SHA-256 = `fe0fc4fa…`; `list_extents` surfaces the raw hole+tail |
+| **nested-file read** | `/Dir1/Beth.txt` (33 B, phys 400) | **macOS** SHA-256 = `ee7c2682…` |
+| **decmpfs type-8 LZVN (resource fork)** | `/compressed.txt` (180000 B): `com.apple.decmpfs` header (type 8) + a `com.apple.ResourceFork` **stream** xattr (dstream 24, 1526 B, three LZVN chunks); decoded transparently by `read_data` | **macOS `cp`** SHA-256 = `3f58a418…` — identical to our decoded output (the cross-extractor check) |
+| **decmpfs other types** | inline 1/9, zlib 3 (+0xFF-stored), LZVN 7 (real chunk + 0x06-stored), LZFSE 11, resource-fork zlib 4 / LZFSE 12 / uncompressed 10 | `forensicnomicon::decmpfs::classify` + `flate2`/`lzvn`/`lzfse_rust`; round-trip / real-chunk |
+| **decmpfs refusals (fail-loud)** | bad magic, truncated, unknown type, dedup type 5, LZBitmap 13/14, missing fork, length mismatch all return a named `ApfsError::Decmpfs` — never fabricated bytes | construction |
+| **extended attributes** | `/plain.txt` carries `com.example.tag`="forensic-marker-P4", `user.note`="second custom attr" (both embedded) | **macOS `xattr -l`** — names + values match `list_xattrs` |
+| **symlink target** | `/symlink_to_beth` → `com.apple.fs.symlink` (embedded) = `"Dir1/Beth.txt"` | **macOS `readlink`** = `Dir1/Beth.txt` |
+
+**SHA-256 oracle reconciliation (the byte-identical cross-extractor check).** Each
+file's content, as assembled by `apfs_core::extent::read_data`, hashes identically
+to the macOS-read bytes captured before detach:
+
+| File | Bytes | `apfs_core::read_data` SHA-256 | macOS `shasum -a 256` | Match |
+|---|---|---|---|---|
+| `/plain.txt` | 35 | `289af0a0…abf86b` | `289af0a0…abf86b` | ✅ |
+| `/sparse.bin` | 69632 | `fe0fc4fa…cc822a` | `fe0fc4fa…cc822a` | ✅ |
+| `/Dir1/Beth.txt` | 33 | `ee7c2682…cfeb96` | `ee7c2682…cfeb96` | ✅ |
+| `/compressed.txt` (decompressed) | 180000 | `3f58a418…3abc78` | `3f58a418…3abc78` | ✅ |
+
+**decmpfs codec reuse (not reinvented).** `core/src/compression.rs` is thin glue
+over the fleet's validated codec stack — `forensicnomicon::decmpfs::classify` for
+the type→algorithm/storage map, `flate2` (zlib 3/4), our length-tolerant
+`lzvn` (`lzvn-core`, types 7/8 — the decoder hfsplus-forensic validated 25/25 on
+real macOS Tahoe data, tolerant of the trailing bytes that `lzfse_rust`'s strict
+path rejects), and `lzfse_rust` (types 11/12). The only APFS-specific logic is
+locating the payload (inline xattr vs `com.apple.ResourceFork` stream).
+
+**Symlink-target source (verified, not assumed).** Empirically the symlink target
+is the **embedded** `com.apple.fs.symlink` xattr value (flags `0x6` =
+`EMBEDDED | 0x4`, value `"Dir1/Beth.txt\0"`), confirmed against the raw fixture
+and macOS `readlink`. (APFS does also store it as a data stream; the xattr form is
+what `ditto`/`ln -s` produced here and what the reader resolves.)
+
+**Tier rationale:** independent oracle (macOS `cp`/`xattr`/`readlink`, Apple's own
+driver, plus the documented construction) on a **self-minted** corpus ⇒ Tier 2
+(`min(independent, self-minted)`). The decmpfs decoder additionally inherits
+hfsplus-forensic's real-macOS validation of the same codec stack. A Tier-1 lift
+needs the same reads run on a real-world macOS image (env-gated, future work).

@@ -401,7 +401,7 @@ Each milestone lands RED tests first, then GREEN, with its oracle. (TDD: separat
 | **P1** | `object.rs` + `container.rs` + `checkpoint.rs`: open NXSB, **Fletcher-64 verify**, walk checkpoint ring to the live superblock, read container geometry | `fsstat` geometry; `fsapfsinfo` NXSB fields |
 | **P2** | `omap.rs` + `btree.rs`: generic btree walk + virtual-oid→paddr resolution (with cycle/alloc caps) | `apfsck` structural; `fsapfsinfo` btree/omap |
 | **P3 ✅** | `volume.rs` + `fsrecord.rs` + `inode.rs` + `dir.rs`: APSB, j_key dispatch, inode metadata, **name→inode path navigation** — DONE (validated vs TSK `fls`/`istat` on the self-minted `apfs_fstree.bin`; inode offsets corrected — see §1.2) | `fls`/`istat`; macOS `stat` |
-| **P4** | `extent.rs` + `compression.rs` + `xattr.rs`: file byte read, decmpfs (REUSE codecs), symlinks/resource-fork | macOS `cp` byte-identical (SHA-256); apfs-fuse |
+| **P4 ✅** | `extent.rs` + `compression.rs` + `xattr.rs`: file byte read, decmpfs (REUSE codecs), symlinks/resource-fork — DONE (validated vs **macOS `cp` byte-identical SHA-256** on the self-minted `apfs_content.bin`: plain/sparse-hole/nested/decmpfs-type-8-LZVN all match; xattrs vs `xattr -l`, symlink vs `readlink`; codec stack reused from `forensicnomicon::decmpfs` + `flate2`/`lzvn-core`/`lzfse_rust`) | macOS `cp` byte-identical (SHA-256) |
 | **P5** | `snapshot.rs`: snapshot metadata + name trees, point-in-time volume view | `tmutil`/`diskutil apfs listSnapshots`; fsapfsinfo |
 | **P6** | `spaceman.rs` + `reaper.rs`: allocation bitmaps, free-queue, deleted-but-unreaped surfacing | `apfsck` spaceman |
 | **P7** | `encryption.rs`: keybag + crypto-state parse, **state surfacing only** | apfs-fuse keybag; macOS `diskutil apfs` |
@@ -470,9 +470,13 @@ to return plaintext (names what it can't do), never fabricates.
 
 ### 8.2 Open — resolve at implementation time
 
-- **decmpfs codec source**: reuse `forensicnomicon::decmpfs` (registry) once its decmpfs module is
-  published at a pinnable version, else a path dep during a coordinated change (as hfsplus did).
-  Confirm/pin the published version when phase P4 (extents + transparent compression) starts.
+- **decmpfs codec source** — ✅ RESOLVED at P4. `core/src/compression.rs` depends on the published
+  `forensicnomicon` (`0.5.8` resolved; `classify`/`MAGIC`/`Storage`/`Algorithm`/`CHUNK_SIZE` are
+  identical through `0.6.0`) for the type→algorithm/storage map, and on the codec crates `flate2`
+  (zlib), **`lzvn-core`** (LZVN, `[lib] name = "lzvn"` — OUR length-tolerant crate, not the
+  third-party bare `lzvn`; the scaffold's `lzvn = "0.1"` was corrected to
+  `lzvn = { package = "lzvn-core" }`), and `lzfse_rust` (LZFSE). Validated byte-identical (SHA-256)
+  vs macOS `cp` on the real type-8 LZVN resource fork in `apfs_content.bin`.
 - **`ER_MAGIC` and a few flag enums** are marked **[UNVERIFIED]** in §1.2 — confirm each verbatim
   against the Apple File System Reference at implementation time rather than trusting this doc.
 

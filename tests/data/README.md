@@ -144,6 +144,70 @@ cross-reference, never duplicate.
   (j_key dispatch + xf_blob), `core/tests/inode.rs` (`j_inode_val_t` vs istat),
   `core/tests/dir.rs` (DIR_REC listing + name→inode navigation vs fls/istat).
 
+#### `apfs_content.bin`
+
+- **Class:** SYNTHETIC (self-minted real APFS), Tier 2.
+- **What it is:** the first **442 blocks** (1.73 MiB, 4096-byte blocks) of a real
+  APFS *container partition* carrying **known content covering every P4 read
+  path**. The carve holds the full chain block 0 + checkpoint ring → live NXSB
+  (block 4, xid 14) → container `omap_phys` (372) + tree (373) → live volume
+  superblock APSB (block 438, xid 14) → volume `omap_phys` (433) + tree (434) →
+  the **file-system tree leaf** (block 432, 44 records) **and** every file's data
+  extents + the compressed file's resource fork (blocks 345–426).
+- **Known content (ground truth — captured by macOS before detach):**
+
+  | path | inode | dstream | size | macOS SHA-256 | notes |
+  |---|---|---|---|---|---|
+  | `/plain.txt` | 18 | 18 | 35 | `289af0a0…abf86b` | single extent @ phys 347; xattrs `com.example.tag`="forensic-marker-P4", `user.note`="second custom attr" |
+  | `/sparse.bin` | 22 | 22 | 69632 | `fe0fc4fa…cc822a` | **sparse**: 64 KiB hole (`phys 0`) + 4 KiB tail @65536 (phys 371) |
+  | `/compressed.txt` | 23 | rfork 24 | 180000 | `3f58a418…3abc78` | **decmpfs type 8 (LZVN, resource fork)**; `com.apple.decmpfs` header embedded, `com.apple.ResourceFork` stream (dstream 24, 1526 B, 3 LZVN chunks @378) |
+  | `/Dir1/Beth.txt` | 28 | 28 | 33 | `ee7c2682…cfeb96` | single extent @ phys 400 |
+  | `/symlink_to_beth` | 29 | — | — | target `Dir1/Beth.txt` | symlink; `com.apple.fs.symlink` embedded xattr = `"Dir1/Beth.txt\0"` |
+
+- **Source:** minted on this macOS host by Apple's own `hdiutil` + `ditto`, so
+  every on-disk structure (incl. the decmpfs LZVN payload and Fletcher-64
+  checksums) is Apple-authored.
+- **Verbatim mint + populate + carve commands:**
+  ```sh
+  # 1. Mint a 128 MiB GPT+APFS container image
+  hdiutil create -size 128m -fs APFS -volname APFSP4 -layout GPTSPUD /tmp/apfsp4
+  # 2. Attach + mount
+  hdiutil attach /tmp/apfsp4.dmg                       # -> /Volumes/APFSP4 (+ /dev/diskN)
+  cd /Volumes/APFSP4
+  # plain file
+  printf 'APFS P4 plain file. Hello extents.\n' > plain.txt
+  # sparse file: a single 4 KiB block at logical offset 64 KiB (a 64 KiB hole)
+  dd if=/dev/urandom of=/tmp/p4blk bs=4096 count=1
+  dd if=/tmp/p4blk of=sparse.bin bs=4096 count=1 seek=16
+  # transparently-compressed file (macOS chooses decmpfs type 8 LZVN resource fork)
+  python3 -c "open('/tmp/src.txt','w').write('The quick brown fox jumps over the lazy dog. '*4000)"
+  ditto --hfsCompression /tmp/src.txt compressed.txt
+  # custom xattrs
+  xattr -w com.example.tag 'forensic-marker-P4' plain.txt
+  xattr -w user.note 'second custom attr' plain.txt
+  # symlink
+  mkdir -p Dir1; printf 'Beth target content for symlink.\n' > Dir1/Beth.txt
+  ln -sf Dir1/Beth.txt symlink_to_beth
+  cd -; sync; hdiutil detach /dev/diskN
+  # 3. Carve the first 442 blocks of the container partition (Apple_APFS slice
+  #    begins at sector 40 of the .dmg)
+  dd if=/tmp/apfsp4.dmg of=apfs_content.bin bs=512 skip=40 count=$((442*8))
+  ```
+- **MD5:** `edb98667c10e8457d9ed6a4eb97d111f`
+- **Independent oracles (run on the SAME image / committed fixture):**
+  - **macOS `shasum -a 256`** of each file (Apple's own driver, post-decmpfs):
+    the SHA-256 column above — every one matches `apfs_core::extent::read_data`.
+  - **macOS `xattr -l plain.txt`**: the two custom attrs + values.
+  - **macOS `readlink symlink_to_beth`** → `Dir1/Beth.txt`.
+  - The decmpfs LZVN resource fork decodes (via `forensicnomicon::decmpfs` +
+    `lzvn-core`) to the same 180000-byte content macOS `cp` produces.
+- **Redistribution:** entirely machine-generated container with author-written
+  placeholder text + a public-domain pangram; no third-party or personal content.
+  Safe to commit.
+- **Consumed by:** `core/tests/extent.rs` (plain/sparse/nested assembly + guards),
+  `core/tests/compression.rs` (decmpfs all types vs macOS cp SHA-256),
+  `core/tests/xattr.rs` (xattr listing + symlink target vs `xattr -l`/`readlink`).
+
 ## Synthetic fixtures (other mint commands)
 
 Recorded here verbatim when added. Planned set (see `docs/validation.md`):
