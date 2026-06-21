@@ -223,12 +223,65 @@ ditto --hfsCompression /path/to/src /Volumes/APFSTEST/compressed
 # Clones (shared extents)
 cp -c bigfile /Volumes/APFSTEST/bigfile.clone
 
-# Snapshots
-tmutil localsnapshot     # or: diskutil apfs ...
+# Snapshots (see the P5 fixture section above — `tmutil localsnapshot` only
+# snapshots the TM-eligible system data volume, NOT a DMG; arbitrary-volume
+# snapshot creation needs the com.apple.developer.vfs.snapshot entitlement,
+# so mint on a SIP-relaxed host with fs_snapshot_create / a TM-registered volume)
 
 # Encrypted volume
 hdiutil create -size 64m -encryption -stdinpass -fs APFS -volname APFSENC apfsenc.dmg
 ```
+
+## P5 snapshot fixture (gitignored, env-gated)
+
+#### `apfs_p5_snapshots.bin` (env `APFS_P5_FIXTURE`)
+
+- **Class:** SYNTHETIC (self-minted real APFS), Tier 2. **Not committed** — minted
+  on a host where APFS snapshot creation is permitted, then pointed at by
+  `APFS_P5_FIXTURE`.
+- **What it is:** a raw APFS *container partition* image carrying **two snapshots**
+  and a file `changing.txt` whose content **differs between the snapshots**
+  (`VERSION ONE` at snapshot 1 → `VERSION TWO`/live), plus an unchanged
+  `static.txt`. Drives `core/tests/snapshot.rs::populated_fixture_point_in_time_read`:
+  the snapshot list (names/xids/create-times) is reconciled against
+  `diskutil apfs listSnapshots` / `fsapfsinfo`, every snap-name resolves back to
+  its xid, and `changing.txt` reads back **v1 bytes** when navigated at snapshot 1
+  (via `mount_snapshot`) vs **v2 bytes** at the live volume — each byte-identical
+  (SHA-256) to what macOS wrote.
+- **Companion env vars** (recorded with the fixture): `APFS_P5_LIVE_APSB` (the
+  live volume APSB block#), `APFS_P5_V1_SHA256`, `APFS_P5_V2_SHA256`.
+- **Verbatim mint commands:**
+  ```sh
+  hdiutil create -size 128m -fs APFS -volname APFSP5 -layout GPTSPUD /tmp/p5.dmg
+  hdiutil attach /tmp/p5.dmg                         # -> /Volumes/APFSP5 (+ /dev/diskN)
+  printf 'APFS P5 snapshot fixture: VERSION ONE content here.\n' > /Volumes/APFSP5/changing.txt
+  printf 'static file, unchanged across snapshots.\n'          > /Volumes/APFSP5/static.txt
+  sync
+  # snapshot 1 (needs the com.apple.developer.vfs.snapshot entitlement — see note):
+  #   fs_snapshot_create(open("/Volumes/APFSP5"), "APFSP5.snap1", 0)
+  printf 'APFS P5 snapshot fixture: VERSION TWO content here!!\n' > /Volumes/APFSP5/changing.txt
+  sync
+  # snapshot 2:  fs_snapshot_create(..., "APFSP5.snap2", 0)
+  diskutil apfs listSnapshots /dev/diskNs1           # oracle: names + xids
+  sync; hdiutil detach /dev/diskN
+  # carve the minimal block range holding both snapshots' chains + changing.txt's
+  # two extent versions (dd bs=512 skip=40 count=$((<blocks>*8))); commit only that
+  # range IF snapshot creation succeeded (gitignore the .dmg).
+  ```
+- **SIP minting blocker (host capability).** On a stock SIP-enabled macOS host,
+  APFS snapshot *creation* on a DMG volume is **not possible without an
+  entitlement**: `fs_snapshot_create(2)` returns `EPERM` even as root,
+  `diskutil apfs` has no `addSnapshot` verb, and `tmutil localsnapshot` only
+  snapshots the Time-Machine-eligible system data volume (never the DMG). Mint
+  this fixture on a SIP-relaxed dev box or a TM-registered volume. The P5 *code*
+  (tree location, empty-case, decode, point-in-time seam, walk control flow) is
+  validated **without** this fixture on the committed `apfs_content.bin` + spec-
+  faithful in-memory vectors — see `docs/validation.md` (P5).
+- **Consumed by:** `core/tests/snapshot.rs` (env-gated populated test).
+
+> The committed P5 validations (empty snap-meta tree, `mount_snapshot` seam, walk
+> control flow) reuse `apfs_content.bin` (above) and in-test synthetic vectors;
+> no new committed fixture was added for P5.
 
 ## Real datasets (gitignored, env-gated)
 

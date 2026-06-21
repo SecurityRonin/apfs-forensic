@@ -1,8 +1,8 @@
 # Validation
 
-> **Status: phases P1–P4 validated (Tier 2).** Results are recorded here as each
-> phase lands; later phases (snapshots, spaceman, encryption, sealed) are still
-> in progress. Claims below are scoped to the validated capabilities and tiered.
+> **Status: phases P1–P5 validated (Tier 2).** Results are recorded here as each
+> phase lands; later phases (spaceman, encryption, sealed) are still in progress.
+> Claims below are scoped to the validated capabilities and tiered.
 
 ## How to read the evidence tiers
 
@@ -179,3 +179,61 @@ driver, plus the documented construction) on a **self-minted** corpus ⇒ Tier 2
 (`min(independent, self-minted)`). The decmpfs decoder additionally inherits
 hfsplus-forensic's real-macOS validation of the same codec stack. A Tier-1 lift
 needs the same reads run on a real-world macOS image (env-gated, future work).
+
+### Snapshots + point-in-time volume view (P5) — Tier 2 (+ env-gated populated path)
+
+**What P5 reads.** A volume's snapshots live in a single B-tree located by the
+APSB's **physical** `apfs_snap_meta_tree_oid` block number (offset 152;
+libfsapfs names it `snapshot_metadata_tree_block_number`, `o_subtype` 0x10
+`SNAPMETATREE`). The tree is variable-KV and holds two record kinds dispatched by
+the `j_key` top-4-bit type: **metadata** (`SNAP_METADATA 1`, keyed by the
+snapshot **xid**, value `j_snap_metadata_val_t`) and **name** (`SNAP_NAME 11`,
+keyed by name, value `j_snap_name_val_t { snap_xid }`). `mount_snapshot` reads a
+snapshot's `sblock_oid` (a physical APSB block) as an `ApfsVolume`, so the
+existing P3/P4 navigation reads the volume as it stood at snapshot time (the
+volume omap resolves fs-tree oids picking `ok_xid ≤ snapshot_xid`).
+
+**Constant verification (before coding).** The `j_snap_metadata_val_t` field
+offsets were taken **verbatim** from libfsapfs `fsapfs_snapshot_metadata_btree_value`
+*and* independently cross-confirmed against dissect.apfs `j_snap_metadata_val`;
+both agree exactly: `extentref_tree_oid@0, sblock_oid@8, create_time@16,
+change_time@24, inum@32, extentref_tree_type@40, flags@44, name_len@48, name@50`.
+A RED unit test caught an early off-by-2 (name placed at @48 instead of @50,
+mis-reading `flags@44` as ending at @46) — the offsets above are what `snapshot.rs`
+implements and what the unit test now asserts.
+
+**What is exercised** (`core/tests/snapshot.rs` + `core/src/snapshot.rs` units):
+
+| Claim | Evidence | Oracle / tier |
+|---|---|---|
+| **snap-meta tree located + walked on real Apple bytes** | the P4 fixture's APSB (block 438) carries `apfs_snap_meta_tree_oid` = block 340, a real `o_subtype 0x10` btree node whose `btn_nkeys` is 0; the walk reads it, **verifies its Fletcher-64 checksum**, and returns zero snapshots | the documented empty tree + Apple-authored checksum (**Tier 2**, real structure) |
+| **`j_snap_metadata_val_t` decode** | every field decoded at the verified offsets | libfsapfs + dissect.apfs agreement (constant verification) |
+| **`j_snap_name_key_t` decode + name→xid resolve** | `resolve_snapshot_xid` returns `None` on the empty real tree; returns the right xid on a populated vector | construction + the libfsapfs `snap_xid` value layout |
+| **point-in-time seam** | `mount_snapshot(sblock_oid = block 438)` yields an `ApfsVolume` **byte-identical** (same oid/xid/omap/root-tree/name `APFSP4`) to a direct `ApfsVolume::parse` of block 438; mounting a non-APSB block (NXSB @0) **fails loudly** with `UnexpectedObjectType` | real P4 APSB (**Tier 2**) |
+| **walk control flow** (leaf dispatch, index-node **virtual** child descent through the volume omap, checksum-mismatch fail-loud, visited-set cycle guard) | spec-faithful hand-built APFS micro-images: real `obj_phys` headers, real Fletcher-64, real variable-KV TOC/key/value + fixed-KV omap layout | **Tier 3** (walk control flow only; every offset/decode it relies on is Tier-2-validated on real data above) |
+
+**Populated changing-file path (env-gated, ready).** The full
+`diskutil apfs listSnapshots` reconciliation and the **v1-vs-v2 point-in-time
+read** (read `changing.txt` at snapshot 1 → v1 SHA-256; at the live volume → v2
+SHA-256; assert each matches what macOS wrote) run from
+`core/tests/snapshot.rs::populated_fixture_point_in_time_read`, gated on
+`APFS_P5_FIXTURE` (+ `APFS_P5_LIVE_APSB` / `APFS_P5_V1_SHA256` / `APFS_P5_V2_SHA256`).
+It **skips cleanly** when the fixture is absent.
+
+> **Minting blocker (host capability, documented).** Creating an APFS snapshot on
+> an arbitrary (DMG) volume requires the `com.apple.developer.vfs.snapshot`
+> entitlement: under SIP, `fs_snapshot_create(2)` returns **`EPERM` even as root**,
+> `diskutil apfs` has no `addSnapshot` verb, and `tmutil localsnapshot` only
+> snapshots the Time-Machine-eligible system data volume (never the DMG). The
+> only entitled creator on a stock host is `tmutil`, which cannot target a DMG.
+> So the populated `changing.txt` fixture is minted on a host where snapshot
+> creation is permitted (SIP-relaxed dev box, or a TM-registered volume); the
+> exact mint commands are recorded in `tests/data/README.md` and
+> `issen/docs/corpus-catalog.md`. The location, empty-case, decode, point-in-time
+> seam, and walk control flow are all validated **now** on real Apple bytes +
+> spec-faithful vectors per the table above.
+
+**Tier rationale:** independent structure (Apple's own snap-meta tree + Fletcher-64)
+on a self-minted corpus ⇒ Tier 2 for the location/empty/seam claims; the populated
+v1-vs-v2 path lifts to Tier 2 with an independent oracle (`diskutil apfs
+listSnapshots` + macOS-written SHA-256) once the env-gated fixture is supplied.
