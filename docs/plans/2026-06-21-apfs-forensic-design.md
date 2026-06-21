@@ -123,6 +123,12 @@ checksum implementation would make `APFS-OBJECT-CKSUM-MISMATCH` fire on every bl
   *(Codex correction: Apple declares these `uint64_t`, not signed; the libfsapfs spec's "signed" for
   snapshot times is libfsapfs's own interpretation. Treat zero as a placeholder/suspicious lead with
   context, NOT as a spec-defined "unset" sentinel.)*
+  **P3 offset correction (verified empirically + reconciled against TSK `istat`):** the *concrete
+  on-disk byte offsets* are `parent_id@0, private_id@8, create@16, mod@24, change@32, access@40,
+  internal_flags@48, nchildren/nlink@56, bsd_flags@68, owner@72, gid@76, mode@80, xfields@92`. The
+  libfsapfs *asciidoc table* renders these 8 bytes later (access@48 / flags@56 / mode@86 /
+  xfields@98) via a phantom gap; the offsets above match Apple's struct and the istat oracle exactly
+  and are what `inode.rs` implements.
 - `j_drec_val { u64 file_id; u64 date_added; u16 flags; u8 xfields[] }` (directory entry).
 - `j_file_extent_val { u64 len_and_flags; u64 phys_block_num; u64 crypto_id }`;
   `J_FILE_EXTENT_LEN_MASK 0x00ffffffffffffff`, `J_FILE_EXTENT_FLAG_SHIFT 56`.
@@ -394,7 +400,7 @@ Each milestone lands RED tests first, then GREEN, with its oracle. (TDD: separat
 | **P0** | scaffold, workspace, lints, tooling, CI skeleton (this commit) | `cargo build` |
 | **P1** | `object.rs` + `container.rs` + `checkpoint.rs`: open NXSB, **Fletcher-64 verify**, walk checkpoint ring to the live superblock, read container geometry | `fsstat` geometry; `fsapfsinfo` NXSB fields |
 | **P2** | `omap.rs` + `btree.rs`: generic btree walk + virtual-oid→paddr resolution (with cycle/alloc caps) | `apfsck` structural; `fsapfsinfo` btree/omap |
-| **P3** | `volume.rs` + `fsrecord.rs` + `inode.rs` + `dir.rs`: APSB, j_key dispatch, inode metadata, **name→inode path navigation** | `fls`/`istat`; macOS `ls -lR@` |
+| **P3 ✅** | `volume.rs` + `fsrecord.rs` + `inode.rs` + `dir.rs`: APSB, j_key dispatch, inode metadata, **name→inode path navigation** — DONE (validated vs TSK `fls`/`istat` on the self-minted `apfs_fstree.bin`; inode offsets corrected — see §1.2) | `fls`/`istat`; macOS `stat` |
 | **P4** | `extent.rs` + `compression.rs` + `xattr.rs`: file byte read, decmpfs (REUSE codecs), symlinks/resource-fork | macOS `cp` byte-identical (SHA-256); apfs-fuse |
 | **P5** | `snapshot.rs`: snapshot metadata + name trees, point-in-time volume view | `tmutil`/`diskutil apfs listSnapshots`; fsapfsinfo |
 | **P6** | `spaceman.rs` + `reaper.rs`: allocation bitmaps, free-queue, deleted-but-unreaped surfacing | `apfsck` spaceman |

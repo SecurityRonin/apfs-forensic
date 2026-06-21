@@ -87,6 +87,63 @@ cross-reference, never duplicate.
   `core/tests/volume_resolve.rs` (virtual `nx_fs_oid` → physical APSB paddr,
   end-to-end).
 
+#### `apfs_fstree.bin`
+
+- **Class:** SYNTHETIC (self-minted real APFS), Tier 2.
+- **What it is:** the first **374 blocks** (1.46 MiB, 4096-byte blocks) of a real
+  APFS *container partition* carrying a **known directory tree**. The carve holds
+  the complete chain: block 0 + checkpoint ring → live NXSB (block 4) → container
+  `omap_phys` (372) + its B-tree root (373) → volume superblock APSB (371) →
+  volume `omap_phys` (366) + its B-tree root (367) → the **file-system tree leaf
+  node** (block 365, a single root+leaf variable-KV node holding all 35 fs
+  records). 374 blocks is the smallest carve in which the full name→inode chain
+  resolves.
+- **Known tree (ground truth):**
+
+  | path | inode | size | mode | uid/gid |
+  |---|---|---|---|---|
+  | `/` (root) | 2 | — | 040755 | 501/20 |
+  | `/top.txt` | 22 | 15 | 100644 | 99/99 |
+  | `/Dir1` | 18 | — | 040755 | 99/99 |
+  | `/Dir1/Beth.txt` | 20 | 38 | 100644 | 99/99 |
+  | `/Dir1/Sub` | 19 | — | 040755 | 99/99 |
+  | `/Dir1/Sub/secret.bin` | 21 | 26 | 100644 | 99/99 |
+
+- **Source:** minted on this macOS host by Apple's own `hdiutil`, so every
+  on-disk structure (incl. the stored Fletcher-64 checksums) is Apple-authored.
+- **Verbatim mint + populate + carve commands:**
+  ```sh
+  # 1. Mint a 128 MiB GPT+APFS container image
+  hdiutil create -size 128m -fs APFS -volname APFSP3 -layout GPTSPUD /tmp/apfsp3
+  # 2. Attach + mount, write a known tree, flush, detach
+  hdiutil attach /tmp/apfsp3.dmg                     # -> /Volumes/APFSP3 (+ /dev/diskN)
+  mkdir -p /Volumes/APFSP3/Dir1/Sub
+  printf 'Beth was here. APFS P3 known fixture.\n' > /Volumes/APFSP3/Dir1/Beth.txt
+  printf 'TOPSECRET-0123456789ABCDEF'              > /Volumes/APFSP3/Dir1/Sub/secret.bin
+  printf 'top level file\n'                          > /Volumes/APFSP3/top.txt
+  sync; hdiutil detach /dev/diskN
+  # 3. Carve the first 374 blocks of the container partition (Apple_APFS slice
+  #    begins at sector 40 of the .dmg)
+  dd if=/tmp/apfsp3.dmg of=apfs_fstree.bin bs=512 skip=40 count=$((374*8))
+  ```
+- **MD5:** `976d6ab26b34c46f38bc44960e934be9`
+- **Independent oracles (run on the SAME image):**
+  - **TSK `fls -r -o 40 -B 371`** lists the tree (top.txt 22, Dir1 18, Beth.txt
+    20, Sub 19, secret.bin 21); **`istat -o 40 -B 371 <inode>`** gives each
+    inode's size, mode, uid/gid, child/link count, and ns-timestamps — the
+    reader's `open_path` results match per file (e.g. Beth.txt: parent 18,
+    size 38, mode 0644, created `1782060082608648902`, accessed `…733745215`,
+    all equal to `istat`).
+  - **macOS `stat -f`** on the mounted volume reported the same inode numbers +
+    sizes before detach.
+  - **TSK `pstat -o 40`** / Apple `diskutil apfs list`: one volume `APFSP3`,
+    APSB block 371, oid 1026, xid 6.
+- **Redistribution:** entirely machine-generated container with author-written
+  placeholder text; no third-party or personal content. Safe to commit.
+- **Consumed by:** `core/tests/volume.rs` (APSB parse), `core/tests/fsrecord.rs`
+  (j_key dispatch + xf_blob), `core/tests/inode.rs` (`j_inode_val_t` vs istat),
+  `core/tests/dir.rs` (DIR_REC listing + name→inode navigation vs fls/istat).
+
 ## Synthetic fixtures (other mint commands)
 
 Recorded here verbatim when added. Planned set (see `docs/validation.md`):
