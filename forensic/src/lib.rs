@@ -18,16 +18,16 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-pub mod integrity;
-pub mod snapshots;
-pub mod sealed;
-pub mod recovery;
-pub mod crypto;
-pub mod timestamps;
 pub mod clones;
+pub mod crypto;
+pub mod integrity;
+pub mod recovery;
+pub mod sealed;
+pub mod snapshots;
+pub mod timestamps;
 
-pub use forensicnomicon::report::{Category, Finding, Severity, Source};
 use forensicnomicon::report::Observation;
+pub use forensicnomicon::report::{Category, Finding, Severity, Source};
 
 /// The APFS-specific anomalies this analyzer can surface. Each variant maps to a
 /// published, scheme-prefixed SCREAMING-KEBAB `code` (never changed once
@@ -37,7 +37,11 @@ use forensicnomicon::report::Observation;
 pub enum AnomalyKind {
     /// `APFS-OBJECT-CKSUM-MISMATCH` — Fletcher-64 over an object body ≠ stored
     /// `o_cksum`. Carries the block, stored, and computed values.
-    ObjectChecksumMismatch { block: u64, stored: u64, computed: u64 },
+    ObjectChecksumMismatch {
+        block: u64,
+        stored: u64,
+        computed: u64,
+    },
     /// `APFS-OMAP-INCONSISTENT` — omap maps a virtual oid to a paddr whose
     /// object oid/xid/type disagrees.
     OmapInconsistent { oid: u64, xid: u64 },

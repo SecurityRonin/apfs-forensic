@@ -430,29 +430,45 @@ to return plaintext (names what it can't do), never fabricates.
 
 ---
 
-## 8. Open questions / risks (for the user to decide before implementation)
+## 8. Decisions and open items
 
-1. **`apfs` crate name on crates.io is taken** (Dil4rd, read-only, 771 dl). We follow ntfs-core's
-   precedent: publish `apfs-core` with `[lib] name = "apfs_core"`, import as `apfs_core::…`, do not
-   hijack the bare `apfs` import. **Confirm this** vs trying to acquire/co-exist on the bare name.
-2. **`im_hash_type` / SSV hash algorithm** — sealed-volume integrity uses a hash type
-   (`apfs_hash_type_t`, e.g. SHA-256). Computing file-info hashes to validate the seal requires the
-   exact canonicalization Apple uses; this is the **least-documented** area and the highest-risk
-   anomaly (`APFS-SEALED-VOLUME-MISMATCH`). Recommend implementing it last (P8) and validating only
-   against a **real** SSV image + `apfsck`, never a synthetic seal we compute ourselves (Tier-3 trap).
-3. **Encryption scope** — propose **state-surfacing + optional unwrap-with-supplied-key only** (no
-   brute force, no key recovery). Confirm we are not expected to decrypt FileVault without a key.
-4. **Oracles need building** — `fsapfsinfo`, `apfsck`, `apfs-fuse` are not installed. Building them
-   (GPL/LGPL, oracle-only, never linked) is a prerequisite for Tier-1 validation. OK to build them
-   into `tools/` (gitignored) on the dev host?
-5. **decmpfs codec source** — reuse `forensicnomicon::decmpfs` (registry) once published, else path
-   dep during a coordinated change (as hfsplus did). Confirm forensicnomicon's decmpfs module is
-   published at a version we can pin.
-6. **`ER_MAGIC` and a few flag enums** were not extracted verbatim here ([UNVERIFIED]); confirm
-   each against the Apple reference at implementation time rather than trusting this doc.
-7. **Snapshot "tampering" semantics** — `APFS-SNAPSHOT-*` codes are observation leads, not proofs.
-   Confirm the framing stays at Info/Medium and "consistent with", since legitimate operations
-   (snapshot deletion by Time Machine thinning) produce similar signatures.
+### 8.1 Resolved (2026-06-21)
+
+1. **Build `apfs-core` from scratch; do not reuse the `apfs` crate as the reader, do not acquire the
+   bare name.** The existing `apfs` crate (Dil4rd/dpp, read-only, 771 downloads) was evaluated for
+   sufficiency and is **not** enough: it has **no Fletcher-64 checksum** verification and **zero
+   sealed-volume / integrity** support — exactly the structures `apfs-forensic`'s
+   `APFS-OBJECT-CKSUM-MISMATCH` and `APFS-SEALED-VOLUME-*` codes depend on — and it uses `unsafe`
+   (5 sites), failing the fleet `forbid(unsafe_code)` bar for attacker-controlled images. This is the
+   `ntfs` precedent exactly (we keep `ntfs_core` rather than hijack Colin Finck's popular `ntfs`
+   crate, for the same forensic-internals + panic-hardening reasons). Publish `apfs-core` with
+   `[lib] name = "apfs_core"`, import as `apfs_core::…`; keep the `apfs` crate as **one Tier-2
+   cross-check oracle** (§4.1), never a dependency.
+2. **Repo published to GitHub `SecurityRonin/apfs-forensic` (public, Apache-2.0)** on 2026-06-21, as a
+   design + skeleton scaffold ahead of implementation, using the fleet README/metadata/Pages standard.
+3. **Encryption scope: state-surfacing + optional unwrap-with-supplied-key only.** No brute force, no
+   key recovery; FileVault is not decrypted without a supplied key. `APFS-ENCRYPTION-*` codes surface
+   the encryption *state* (keybag presence, wrapped-key class, software vs hardware) as observations.
+4. **Oracles build into a gitignored `tools/` on the dev host** (`fsapfsinfo`, `apfsck`, `apfs-fuse`
+   — GPL/LGPL, oracle-only, **never linked**). Data-sourcing preference, fleet-wide and binding for
+   this crate: **real data > synthetic > and document provenance in every case** (real macOS / SSV
+   images preferred; `hdiutil`/`ditto`/`tmutil`-minted artifacts next; both recorded in
+   `tests/data/README.md` with verbatim generators + the oracle output).
+5. **Sealed-volume hash (`im_hash_type` / SSV seal) is implemented LAST (phase P8)** and validated
+   **only** against a real SSV image + `apfsck` — never a synthetic seal we compute ourselves
+   (the canonicalization is the least-documented area; a self-authored seal is the Tier-3 LZNT1 trap).
+   `APFS-SEALED-VOLUME-HASH-MISMATCH` ships only once that real-data validation exists.
+6. **Snapshot codes stay observation leads.** `APFS-SNAPSHOT-*` are framed Info/Medium and worded
+   "consistent with", never as proof — legitimate operations (Time Machine thinning) produce similar
+   signatures, so the analyst/tribunal draws the conclusion (fleet expert-witness discipline).
+
+### 8.2 Open — resolve at implementation time
+
+- **decmpfs codec source**: reuse `forensicnomicon::decmpfs` (registry) once its decmpfs module is
+  published at a pinnable version, else a path dep during a coordinated change (as hfsplus did).
+  Confirm/pin the published version when phase P4 (extents + transparent compression) starts.
+- **`ER_MAGIC` and a few flag enums** are marked **[UNVERIFIED]** in §1.2 — confirm each verbatim
+  against the Apple File System Reference at implementation time rather than trusting this doc.
 
 ---
 

@@ -34,24 +34,24 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-pub mod object;
-pub mod container;
-pub mod checkpoint;
-pub mod omap;
 pub mod btree;
-pub mod volume;
-pub mod fsrecord;
-pub mod inode;
-pub mod dir;
-pub mod extent;
-pub mod xattr;
+pub mod checkpoint;
 pub mod compression;
+pub mod container;
+pub mod dir;
+pub mod encryption;
+pub mod extent;
+pub mod fsrecord;
+pub mod fusion;
+pub mod inode;
+pub mod object;
+pub mod omap;
+pub mod reaper;
+pub mod sealed;
 pub mod snapshot;
 pub mod spaceman;
-pub mod reaper;
-pub mod encryption;
-pub mod sealed;
-pub mod fusion;
+pub mod volume;
+pub mod xattr;
 
 use std::io::{Read, Seek};
 
@@ -70,7 +70,11 @@ pub enum ApfsError {
     NoValidSuperblock { checked: usize, last_magic: u32 },
     /// Object Fletcher-64 checksum did not validate.
     #[error("object checksum mismatch at block {block}: stored {stored:#018x}, computed {computed:#018x}")]
-    ChecksumMismatch { block: u64, stored: u64, computed: u64 },
+    ChecksumMismatch {
+        block: u64,
+        stored: u64,
+        computed: u64,
+    },
     /// An object map could not resolve a virtual oid at the requested xid.
     #[error("omap could not resolve virtual oid {oid:#x} at xid {xid}")]
     OmapUnresolved { oid: u64, xid: u64 },
@@ -81,7 +85,12 @@ pub enum ApfsError {
     /// A length/offset/count field from the image exceeded a sanity cap
     /// (allocation-bomb / corruption defense). Carries the offending value.
     #[error("structural field out of range in {structure}: {field} = {value} (cap {cap})")]
-    FieldOutOfRange { structure: &'static str, field: &'static str, value: u64, cap: u64 },
+    FieldOutOfRange {
+        structure: &'static str,
+        field: &'static str,
+        value: u64,
+        cap: u64,
+    },
     /// A tree walk exceeded the cycle-guard depth (malicious/cyclic oid graph).
     #[error("tree walk exceeded depth cap {cap} (possible cyclic object graph)")]
     CycleGuard { cap: usize },
