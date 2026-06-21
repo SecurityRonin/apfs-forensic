@@ -28,6 +28,7 @@
 //! | 72  | 8    | `om_pending_revert_min`|
 //! | 80  | 8    | `om_pending_revert_max`|
 
+use crate::btree::{self, BTreeSubtype};
 use crate::object::{fletcher64_checksum, fletcher64_stored, ObjPhys};
 
 /// Object type code `OBJECT_TYPE_OMAP` (Apple): `o_type & 0xffff == 0xb`.
@@ -41,6 +42,22 @@ const OFF_OM_SNAPSHOT_TREE_OID: usize = 56;
 
 /// Minimum readable `omap_phys_t` length: header through `om_tree_oid`.
 const OMAP_PHYS_MIN_LEN: usize = OFF_OM_TREE_OID + 8;
+
+/// A resolved object-map entry (`omap_val_t` for a matched `omap_key_t`).
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct OmapEntry {
+    /// Virtual object id (`ok_oid`).
+    pub oid: u64,
+    /// Transaction id of this mapping (`ok_xid`).
+    pub xid: u64,
+    /// Physical block address the virtual oid resolves to (`ov_paddr`).
+    pub paddr: u64,
+    /// `ov_size` (object size in bytes; one block for most objects).
+    pub size: u32,
+    /// `ov_flags`.
+    pub flags: u32,
+}
 
 /// An object map header (`omap_phys_t`): the entry point into a volume/container
 /// object map's backing B-tree.
@@ -130,5 +147,57 @@ impl ObjectMap {
     #[must_use]
     pub fn snapshot_tree_oid(&self) -> u64 {
         self.snapshot_tree_oid
+    }
+
+    /// Resolve a virtual `oid` at transaction `xid` to a physical block address
+    /// by walking the omap B-tree, choosing the entry with the **largest
+    /// `ok_xid` ≤ `xid`** for the matching `ok_oid` (the most-recent state at or
+    /// before the requested transaction).
+    ///
+    /// The container omap tree is stored physically, so [`Self::tree_oid`] is the
+    /// root node's block address; the walk reads each node by its physical
+    /// address, verifying its Fletcher-64 checksum and guarding against cyclic
+    /// node links.
+    ///
+    /// # Errors
+    /// [`crate::ApfsError::OmapUnresolved`] if no mapping for `oid` at or before
+    /// `xid` exists; [`crate::ApfsError::ChecksumMismatch`] /
+    /// [`crate::ApfsError::CycleGuard`] / [`crate::ApfsError::Io`] on a
+    /// structurally invalid tree or a read failure.
+    pub fn resolve<R: std::io::Read + std::io::Seek>(
+        &self,
+        reader: &mut R,
+        oid: u64,
+        xid: u64,
+        block_size: usize,
+    ) -> crate::Result<OmapEntry> {
+        let mut best: Option<OmapEntry> = None;
+        btree::for_each_leaf_entry(
+            reader,
+            self.tree_oid,
+            block_size,
+            BTreeSubtype::Omap,
+            &mut |key, value| {
+                // omap_key { ok_oid u64 @0, ok_xid u64 @8 }
+                let k_oid = crate::bytes::le_u64(key, 0);
+                let k_xid = crate::bytes::le_u64(key, 8);
+                if k_oid != oid || k_xid > xid {
+                    return;
+                }
+                // omap_val { ov_flags u32 @0, ov_size u32 @4, ov_paddr u64 @8 }
+                let entry = OmapEntry {
+                    oid: k_oid,
+                    xid: k_xid,
+                    flags: crate::bytes::le_u32(value, 0),
+                    size: crate::bytes::le_u32(value, 4),
+                    paddr: crate::bytes::le_u64(value, 8),
+                };
+                // Keep the most-recent (largest xid ≤ requested) candidate.
+                if best.is_none_or(|b| k_xid > b.xid) {
+                    best = Some(entry);
+                }
+            },
+        )?;
+        best.ok_or(crate::ApfsError::OmapUnresolved { oid, xid })
     }
 }

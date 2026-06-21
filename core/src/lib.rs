@@ -193,6 +193,55 @@ impl<R: Read + Seek> ApfsContainer<R> {
         self.live_superblock_paddr
     }
 
+    /// Resolve the physical block address of each volume superblock (APSB).
+    ///
+    /// The live NXSB names its volumes by *virtual* oid (`nx_fs_oid[]`). Each is
+    /// resolved through the **container object map** (`nx_omap_oid`, a physical
+    /// omap object whose B-tree is stored physically) at the container's
+    /// transaction id, yielding the physical block address of that volume's
+    /// `apfs_superblock_t`. These paddrs feed volume parsing (phase P3).
+    ///
+    /// Resolution is deterministic and leaves the reader position arbitrary (it
+    /// seeks as it walks), so callers should not assume a cursor position after.
+    ///
+    /// # Errors
+    /// [`ApfsError::FieldOutOfRange`] if `nx_block_size` is outside the spec
+    /// range; [`ApfsError::UnexpectedObjectType`] if `nx_omap_oid` does not point
+    /// at an omap object; [`ApfsError::OmapUnresolved`] if a `nx_fs_oid` has no
+    /// mapping; [`ApfsError::ChecksumMismatch`] / [`ApfsError::CycleGuard`] /
+    /// [`ApfsError::Io`] on a structurally invalid omap or a read failure.
+    pub fn volume_superblock_addrs(&mut self) -> Result<Vec<u64>> {
+        let block_size = self.superblock.block_size;
+        if !(container::NX_MINIMUM_BLOCK_SIZE..=container::NX_MAXIMUM_BLOCK_SIZE)
+            .contains(&block_size)
+        {
+            return Err(ApfsError::FieldOutOfRange {
+                structure: "nx_superblock",
+                field: "nx_block_size",
+                value: u64::from(block_size),
+                cap: u64::from(container::NX_MAXIMUM_BLOCK_SIZE),
+            });
+        }
+        let block_size = block_size as usize;
+
+        // Read the container omap_phys block (nx_omap_oid is a physical oid, so
+        // it is also the omap object's block address).
+        let mut buf = vec![0u8; block_size];
+        let omap_off = self.superblock.omap_oid.saturating_mul(block_size as u64);
+        self.reader.seek(std::io::SeekFrom::Start(omap_off))?;
+        self.reader.read_exact(&mut buf)?;
+        let omap = omap::ObjectMap::parse(&buf)?;
+
+        // Resolve each virtual fs_oid through the omap at the container xid.
+        let xid = self.superblock.xid;
+        let mut addrs = Vec::with_capacity(self.superblock.fs_oids.len());
+        for &fs_oid in &self.superblock.fs_oids {
+            let entry = omap.resolve(&mut self.reader, fs_oid, xid, block_size)?;
+            addrs.push(entry.paddr);
+        }
+        Ok(addrs)
+    }
+
     /// Consume the container, returning the underlying reader.
     #[must_use]
     pub fn into_reader(self) -> R {
