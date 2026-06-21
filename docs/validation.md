@@ -50,3 +50,34 @@ Verbatim mint commands are recorded in `issen/docs/corpus-catalog.md` and
 `tests/data/README.md`. Carving/recovery is validated against an **independent**
 oracle (real images / pre-delete capture + apfsck), not only records we deleted
 ourselves.
+
+## Validated capabilities
+
+### Object map + B-tree navigation + volume-superblock resolution (P2) — Tier 2
+
+**Corpus:** `tests/data/apfs_container_chain.bin` — blocks 0–344 (1.38 MiB) of a
+real APFS *container partition* minted by Apple's own `hdiutil`
+(`hdiutil create -size 128m -fs APFS -volname APFSORACLE -layout GPTSPUD`). The
+slice holds the complete checkpoint ring **and** the full
+NXSB → container omap → omap B-tree → volume superblock (APSB) chain. Because the
+carve starts at NXSB block 0, a physical block address maps directly to
+`paddr * 4096` in the fixture. Provenance + MD5 in `tests/data/README.md`.
+
+**What is exercised** (`core/tests/{omap,btree,btree_descend,volume_resolve}.rs`):
+
+| Claim | Evidence | Oracle |
+|---|---|---|
+| `omap_phys_t` header decode (`om_flags`/`om_tree_type`/`om_tree_oid`/`om_snapshot_tree_oid`) | `nx_omap_oid = 343` → `om_tree_oid = 344`, `om_flags = OMAP_MANUALLY_MANAGED` | offsets verified verbatim vs the Apple reference + libfsapfs; raw-image decode |
+| `btree_node_phys_t` header + TOC iterate (fixed + variable KV) | omap root @344: `btn_flags = 0x7` (ROOT\|LEAF\|FIXED), 1 fixed entry `omap_key(1026,2)` → `omap_val(paddr 342)` | Apple reference + libfsapfs spec (4-byte `kvoff_t`, 8-byte `kvloc_t`, `btree_info` footer) |
+| Root→leaf descent with cksum + cycle guards | real omap walk yields exactly `(1026, 2, 342)`; a corrupted node fails Fletcher-64 (`ChecksumMismatch`); a self-referential index node trips `CycleGuard` | construction; checksum-before-trust |
+| Virtual `nx_fs_oid` → physical APSB paddr | `volume_superblock_addrs() == [342]`; block 342 carries APSB magic `0x42535041` + valid Fletcher-64 | **Apple `diskutil apfs list`** and **libfsapfs `fsapfsinfo`** (run on the committed fixture) each report **exactly one volume** (`APFSORACLE`) — matching the single resolved APSB |
+
+**Independence:** `fsapfsinfo` (libfsapfs, a separate C codebase) reads the exact
+committed `apfs_container_chain.bin` and reports `Number of volumes: 1`, volume
+identifier `fa8b74aa-…`, name `APFSORACLE` — matching Apple `diskutil`. The
+B-tree TOC and value offsets were verified verbatim against the Apple *APFS
+Reference* and the libfsapfs format spec before implementation, not from memory.
+
+**Tier rationale:** independent oracle (libfsapfs/diskutil) on a **self-minted**
+corpus ⇒ Tier 2 (`min(independent, self-minted)`). A Tier-1 lift needs the same
+resolution run on a real-world / third-party image (env-gated, future work).
