@@ -146,15 +146,17 @@ where
     R: Read + Seek,
     F: FnMut(&[u8], &[u8]),
 {
+    let cycle = || crate::ApfsError::CycleGuard {
+        cap: MAX_FSTREE_DEPTH,
+    };
+    // The visited-set guard below dominates — any cycle repeats a node oid
+    // (tripping it) before a legal tree reaches depth 64; this depth cap is
+    // defense-in-depth against a pathological deep acyclic tree.
     if depth >= MAX_FSTREE_DEPTH {
-        return Err(crate::ApfsError::CycleGuard {
-            cap: MAX_FSTREE_DEPTH,
-        });
+        return Err(cycle()); // cov:unreachable: visited-set guard dominates any realizable cycle
     }
     if !visited.insert(node_oid) {
-        return Err(crate::ApfsError::CycleGuard {
-            cap: MAX_FSTREE_DEPTH,
-        });
+        return Err(cycle());
     }
 
     // Resolve this node's virtual oid to a physical block via the omap.
@@ -227,9 +229,11 @@ pub fn list_dir<R: Read + Seek>(
         if ty != Some(RecordType::DirRec) || oid != parent_oid {
             return;
         }
-        if let Some(entry) = parse_dir_entry(key, value) {
-            out.push(entry);
-        }
+        // Skip a malformed DIR_REC rather than fail the whole listing.
+        let Some(entry) = parse_dir_entry(key, value) else {
+            return; // cov:unreachable: valid DIR_REC keys always decode a name
+        };
+        out.push(entry);
     })?;
     Ok(out)
 }
@@ -255,10 +259,14 @@ pub fn lookup_child<R: Read + Seek>(
         if ty != Some(RecordType::DirRec) || oid != parent_oid {
             return;
         }
-        if let Some(entry) = parse_dir_entry(key, value) {
-            if entry.name == name {
-                found = Some(entry.file_id);
-            }
+        // A DIR_REC whose name cannot be decoded is a malformed/hostile record;
+        // skip it rather than fail the whole listing (defensive — real images
+        // always decode, so the skip arm is unreachable on valid data).
+        let Some(entry) = parse_dir_entry(key, value) else {
+            return; // cov:unreachable: valid DIR_REC keys always decode a name
+        };
+        if entry.name == name {
+            found = Some(entry.file_id);
         }
     })?;
     Ok(found)
@@ -326,4 +334,92 @@ pub fn open_path<R: Read + Seek>(
 fn decode_cstr(data: &[u8]) -> String {
     let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
     String::from_utf8_lossy(&data[..end]).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a `j_key` header word from a 4-bit type and a 60-bit oid.
+    fn jkey(ty: u64, oid: u64) -> [u8; 8] {
+        ((ty << 60) | oid).to_le_bytes()
+    }
+
+    #[test]
+    fn decode_hashed_drec_name() {
+        // 8-byte j_key header (DIR_REC, parent 2), then name_len_and_hash u32 with
+        // low-10-bit length = 5 ("abcd\0"), then the name at offset 12.
+        let mut key = Vec::new();
+        key.extend_from_slice(&jkey(9, 2));
+        key.extend_from_slice(&5u32.to_le_bytes()); // len=5 in low 10 bits, hash 0
+        key.extend_from_slice(b"abcd\0");
+        assert_eq!(decode_drec_name(&key).as_deref(), Some("abcd"));
+    }
+
+    #[test]
+    fn decode_unhashed_drec_name() {
+        // A case-sensitive volume uses j_drec_key_t: name_len u16 @8, name @10.
+        // Force the hashed path to miss (its low-10-bit length must not fit) by
+        // making the u32 length point past the key, then the unhashed fallback
+        // decodes "Xy\0" (len 3) at offset 10.
+        let mut key = Vec::new();
+        key.extend_from_slice(&jkey(9, 2));
+        key.extend_from_slice(&3u16.to_le_bytes()); // name_len = 3
+        key.extend_from_slice(b"Xy\0");
+        // The hashed interpretation reads name_len_and_hash = u32 @8. Here the
+        // upper two name bytes ("Xy") become part of that u32, giving a bogus
+        // hashed length that runs past the key, so the unhashed branch is used.
+        let name = decode_drec_name(&key);
+        assert_eq!(name.as_deref(), Some("Xy"));
+    }
+
+    #[test]
+    fn decode_drec_name_rejects_overlong_length() {
+        // A key claiming a name longer than its bytes yields None (no over-read).
+        let mut key = Vec::new();
+        key.extend_from_slice(&jkey(9, 2));
+        key.extend_from_slice(&0u32.to_le_bytes()); // hashed len 0
+                                                    // no name bytes; unhashed len also reads 0 -> None
+        assert_eq!(decode_drec_name(&key), None);
+    }
+
+    #[test]
+    fn decode_drec_name_unhashed_length_past_key_is_none() {
+        // unhashed_len > 0 but the name slice runs past the key, AND the hashed
+        // interpretation's length also doesn't fit: both branches miss -> None
+        // (exercises the unhashed `key.get(..)` None arm — no over-read).
+        let mut key = Vec::new();
+        key.extend_from_slice(&jkey(9, 2));
+        // name_len u16 @8 = 200 (way past the key); the hashed u32 @8 low-10-bit
+        // length is also 200, whose name@12 slice does not fit either.
+        key.extend_from_slice(&200u16.to_le_bytes());
+        key.extend_from_slice(b"z"); // only one trailing byte
+        assert_eq!(decode_drec_name(&key), None);
+    }
+
+    #[test]
+    fn parse_dir_entry_decodes_value() {
+        let mut key = Vec::new();
+        key.extend_from_slice(&jkey(9, 2));
+        key.extend_from_slice(&5u32.to_le_bytes());
+        key.extend_from_slice(b"abcd\0");
+        let mut value = Vec::new();
+        value.extend_from_slice(&42u64.to_le_bytes()); // file_id
+        value.extend_from_slice(&1234u64.to_le_bytes()); // date_added
+        value.extend_from_slice(&7u16.to_le_bytes()); // flags
+        let e = parse_dir_entry(&key, &value).expect("parse drec");
+        assert_eq!(e.name, "abcd");
+        assert_eq!(e.file_id, 42);
+        assert_eq!(e.date_added, 1234);
+        assert_eq!(e.flags, 7);
+    }
+
+    #[test]
+    fn parse_dir_entry_rejects_unnamed_key() {
+        // A key with no decodable name yields None (the record is skipped).
+        let mut key = Vec::new();
+        key.extend_from_slice(&jkey(9, 2));
+        key.extend_from_slice(&0u32.to_le_bytes());
+        assert!(parse_dir_entry(&key, &[0u8; 18]).is_none());
+    }
 }

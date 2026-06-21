@@ -142,3 +142,18 @@ fn parse_xfields_empty_blob() {
     // num_exts = 0
     assert!(parse_xfields(&[0, 0, 0, 0]).is_empty());
 }
+
+#[test]
+fn parse_xfields_value_running_past_blob_is_dropped() {
+    // The descriptor table fits, but the declared value size runs past the blob:
+    // the field is dropped (the value slice is bounds-checked), not over-read.
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&1u16.to_le_bytes()); // num_exts = 1
+    blob.extend_from_slice(&0u16.to_le_bytes());
+    blob.push(4); // x_type
+    blob.push(0); // x_flags
+    blob.extend_from_slice(&64u16.to_le_bytes()); // x_size = 64, but no value bytes
+                                                  // descriptor table (8 bytes) fits; the 64-byte value does not.
+    let fields = parse_xfields(&blob);
+    assert!(fields.is_empty());
+}

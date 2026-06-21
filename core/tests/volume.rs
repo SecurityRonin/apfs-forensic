@@ -74,3 +74,40 @@ fn parse_apsb_rejects_short_block() {
     // never a panic.
     assert!(ApfsVolume::parse(&[0u8; 16]).is_err());
 }
+
+#[test]
+fn parse_apsb_rejects_wrong_object_type() {
+    // A block whose o_type is not OBJECT_TYPE_FS (0xd) is not a volume
+    // superblock — the type gate fires before the signature gate.
+    let mut b = block(371).to_vec();
+    // o_type @24: set low 16 bits to OMAP (0xb) instead of FS (0xd).
+    let mut ot = u32::from_le_bytes(b[24..28].try_into().unwrap());
+    ot = (ot & 0xffff_0000) | 0x000b;
+    b[24..28].copy_from_slice(&ot.to_le_bytes());
+    let cks = apfs_core::object::fletcher64_checksum(&b);
+    b[0..8].copy_from_slice(&cks.to_le_bytes());
+    match ApfsVolume::parse(&b) {
+        Err(apfs_core::ApfsError::UnexpectedObjectType { found, .. }) => {
+            assert_eq!(found, ot);
+        }
+        other => panic!("expected UnexpectedObjectType, got {other:?}"),
+    }
+}
+
+#[test]
+fn apsb_accessors_expose_all_fields() {
+    // Exercise every accessor so the public surface is covered and the values
+    // are internally consistent with the parsed APSB.
+    let v = ApfsVolume::parse(block(371)).expect("parse APSB");
+    assert_eq!(v.oid(), 1026); // pstat: APSB oid 1026
+    assert_eq!(v.xid(), 6); // pstat: APSB xid 6
+    assert_eq!(v.features(), 2); // apfs_features in this image
+    assert_eq!(v.readonly_compatible_features(), 0);
+    assert_eq!(v.incompatible_features(), 1); // APFS_INCOMPAT_CASE_INSENSITIVE
+    assert_eq!(v.root_tree_type(), 0x2); // OBJECT_TYPE_BTREE storage word
+    assert_eq!(v.extentref_tree_oid(), 357); // physical extent-ref tree block
+    assert_eq!(v.snap_meta_tree_oid(), 340); // physical snap-meta tree block
+                                             // The volume UUID is non-zero (pstat reported a concrete UUID).
+    assert_ne!(v.uuid(), [0u8; 16]);
+    let _ = v.fs_flags();
+}

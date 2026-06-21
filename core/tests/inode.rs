@@ -121,6 +121,43 @@ fn ns_to_datetime_handles_huge_value() {
 }
 
 #[test]
+fn inode_datetime_accessors_round_trip() {
+    // Exercise modified/changed/accessed alongside created; each must convert the
+    // stored ns to a UTC datetime whose seconds match the raw field.
+    let v = inode_value(20);
+    let inode = Inode::parse(20, &v).expect("parse inode");
+    assert_eq!(
+        inode.modified().unwrap().timestamp_subsec_nanos(),
+        608_686_902
+    );
+    assert_eq!(
+        inode.changed().unwrap().timestamp_subsec_nanos(),
+        608_686_902
+    );
+    assert_eq!(
+        inode.accessed().unwrap().timestamp_subsec_nanos(),
+        733_745_215
+    );
+}
+
+#[test]
+fn parse_inode_with_unknown_xfield_is_ignored() {
+    // An inode value whose xfields carry only an unrecognized type must parse
+    // (the unknown field is skipped, name/size stay None).
+    let mut v = vec![0u8; 92];
+    // xf_blob: 1 ext, used 8; descriptor type=99 (unknown), size=8; 8-byte value.
+    v.extend_from_slice(&1u16.to_le_bytes());
+    v.extend_from_slice(&8u16.to_le_bytes());
+    v.push(99);
+    v.push(0);
+    v.extend_from_slice(&8u16.to_le_bytes());
+    v.extend_from_slice(&[0u8; 8]);
+    let inode = Inode::parse(7, &v).expect("parse inode with unknown xfield");
+    assert_eq!(inode.name, None);
+    assert_eq!(inode.size, None);
+}
+
+#[test]
 fn parse_short_inode_value_is_bounded() {
     // A truncated inode value must not panic; fields beyond the buffer read 0.
     let inode = Inode::parse(99, &[0u8; 8]).expect("parse short value");
