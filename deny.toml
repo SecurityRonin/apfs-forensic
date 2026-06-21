@@ -6,6 +6,8 @@ all-features = false
 version = 2
 yanked = "deny"
 
+[licenses]
+version = 2
 # Apache-2.0 crate; permit only permissive, non-copyleft licences in the tree.
 # (The LGPL/GPL/AGPL APFS references — libfsapfs, apfs-fuse, apfsprogs,
 # dissect.apfs — are external ORACLES run as separate binaries, never linked,
