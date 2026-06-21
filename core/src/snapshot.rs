@@ -462,4 +462,321 @@ mod tests {
             "mounting a non-APSB block must fail loudly, got {err:?}"
         );
     }
+
+    // ---------------------------------------------------------------------
+    // Synthetic-image walk tests.
+    //
+    // The real P4 fixture validates tree *location* + the *empty* case on
+    // Apple-authored bytes; the populated-tree paths (leaf record dispatch,
+    // index-node virtual descent, checksum/cycle guards) need a tree that
+    // actually carries records. Minting a populated snapshot tree on this host
+    // is blocked by SIP (fs_snapshot_create requires an entitlement — see
+    // docs/validation.md), so the *walk algorithm* is exercised here against a
+    // hand-built, spec-faithful APFS micro-image: real obj_phys headers, real
+    // Fletcher-64 checksums, real variable-KV btree TOC/key/value layout
+    // (verified vs btree.rs + the Apple reference). This is a Tier-3 vector for
+    // the walk control flow only; every on-disk *offset/decode* it relies on is
+    // independently validated on real data by the P1–P5 fixtures.
+    const BS: usize = 4096;
+
+    /// Stamp a valid Fletcher-64 `o_cksum` into the first 8 bytes of `block`.
+    fn seal(block: &mut [u8]) {
+        let c = fletcher64_checksum(block);
+        block[0..8].copy_from_slice(&c.to_le_bytes());
+    }
+
+    /// Build a 32-byte `obj_phys_t` prefix into `block` (cksum left for `seal`).
+    fn obj_hdr(block: &mut [u8], oid: u64, xid: u64, o_type: u32, o_subtype: u32) {
+        block[8..16].copy_from_slice(&oid.to_le_bytes());
+        block[16..24].copy_from_slice(&xid.to_le_bytes());
+        block[24..28].copy_from_slice(&o_type.to_le_bytes());
+        block[28..32].copy_from_slice(&o_subtype.to_le_bytes());
+    }
+
+    /// Build a variable-KV B-tree node block (root) from `(key, value)` records.
+    /// `is_leaf` selects `BTNODE_LEAF`; a non-leaf node's values are 8-byte child
+    /// block numbers. Layout matches `btree::node_entries` exactly: a TOC of
+    /// 8-byte `kvloc_t` entries at the start of `btn_data`, keys growing forward
+    /// from the end of the TOC, values growing backward from the footer.
+    fn btree_node(oid: u64, xid: u64, is_leaf: bool, records: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+        const FOOTER: usize = 40;
+        let mut b = vec![0u8; BS];
+        // btn_flags: ROOT(0x1) | (LEAF 0x2 if leaf). Variable-KV (no FIXED bit).
+        let flags: u16 = 0x1 | if is_leaf { 0x2 } else { 0 };
+        b[32..34].copy_from_slice(&flags.to_le_bytes());
+        let level: u16 = u16::from(!is_leaf);
+        b[34..36].copy_from_slice(&level.to_le_bytes());
+        b[36..40].copy_from_slice(&(records.len() as u32).to_le_bytes());
+
+        let toc_len = records.len() * 8;
+        // btn_table_space nloc: off (relative to btn_data @56) = 0, len = toc_len.
+        b[40..42].copy_from_slice(&0u16.to_le_bytes());
+        b[42..44].copy_from_slice(&(toc_len as u16).to_le_bytes());
+
+        let toc_start = 56; // btn_data + 0
+        let key_area = toc_start + toc_len;
+        let val_base = BS - FOOTER; // root: values reversed from footer start
+
+        let mut key_off = 0usize; // forward from key_area
+        let mut val_off = 0usize; // backward from val_base
+        for (i, (k, v)) in records.iter().enumerate() {
+            let e = toc_start + i * 8;
+            b[e..e + 2].copy_from_slice(&(key_off as u16).to_le_bytes());
+            b[e + 2..e + 4].copy_from_slice(&(k.len() as u16).to_le_bytes());
+            // value_offs is the reversed distance from val_base to the value end.
+            let this_val = v.len();
+            let v_reversed = val_off + this_val;
+            b[e + 4..e + 6].copy_from_slice(&(v_reversed as u16).to_le_bytes());
+            b[e + 6..e + 8].copy_from_slice(&(this_val as u16).to_le_bytes());
+
+            let ks = key_area + key_off;
+            b[ks..ks + k.len()].copy_from_slice(k);
+            let vs = val_base - v_reversed;
+            b[vs..vs + this_val].copy_from_slice(v);
+
+            key_off += k.len();
+            val_off += this_val;
+        }
+        obj_hdr(&mut b, oid, xid, 0x4000_0002, 0x10); // PHYSICAL|BTREE, SNAPMETATREE
+        seal(&mut b);
+        b
+    }
+
+    /// `j_key` header for a snap record: top-4 type, low-60 oid/xid.
+    fn snap_jkey(ty: u64, id: u64) -> Vec<u8> {
+        ((ty << 60) | id).to_le_bytes().to_vec()
+    }
+
+    /// A `j_snap_metadata_val_t` with a given `sblock_oid`, name, `create_time`.
+    fn snap_meta_val(sblock: u64, create: u64, name: &str) -> Vec<u8> {
+        let mut v = vec![0u8; OFF_SNAP_NAME];
+        v[OFF_SNAP_SBLOCK_OID..OFF_SNAP_SBLOCK_OID + 8].copy_from_slice(&sblock.to_le_bytes());
+        v[OFF_SNAP_CREATE_TIME..OFF_SNAP_CREATE_TIME + 8].copy_from_slice(&create.to_le_bytes());
+        let mut name_b = name.as_bytes().to_vec();
+        name_b.push(0);
+        v[OFF_SNAP_NAME_LEN..OFF_SNAP_NAME_LEN + 2]
+            .copy_from_slice(&(name_b.len() as u16).to_le_bytes());
+        v.extend_from_slice(&name_b);
+        v
+    }
+
+    /// A `j_snap_name_key_t` (name) record key.
+    fn snap_name_key(name: &str) -> Vec<u8> {
+        let mut k = snap_jkey(11, 0);
+        let mut name_b = name.as_bytes().to_vec();
+        name_b.push(0);
+        k.extend_from_slice(&(name_b.len() as u16).to_le_bytes());
+        k.extend_from_slice(&name_b);
+        k
+    }
+
+    /// Build a minimal valid APSB at `oid`/`xid` referencing `omap_oid` +
+    /// `snap_meta_tree_oid`.
+    fn apsb(oid: u64, xid: u64, omap_oid: u64, snap_meta_oid: u64) -> Vec<u8> {
+        let mut b = vec![0u8; BS];
+        b[32..36].copy_from_slice(&0x4253_5041u32.to_le_bytes()); // "APSB"
+        b[128..136].copy_from_slice(&omap_oid.to_le_bytes()); // apfs_omap_oid
+        b[152..160].copy_from_slice(&snap_meta_oid.to_le_bytes()); // snap_meta_tree
+        obj_hdr(&mut b, oid, xid, 0x0d, 0); // OBJECT_TYPE_FS
+        seal(&mut b);
+        b
+    }
+
+    /// Build a minimal volume omap (`omap_phys`) whose btree (a single physical
+    /// fixed-KV leaf at `tree_block`) maps `(virt_oid, xid) -> phys`.
+    fn omap_block(oid: u64, tree_block: u64) -> Vec<u8> {
+        let mut b = vec![0u8; BS];
+        b[40..44].copy_from_slice(&0x4000_0002u32.to_le_bytes()); // om_tree_type
+        b[48..56].copy_from_slice(&tree_block.to_le_bytes()); // om_tree_oid (physical)
+        obj_hdr(&mut b, oid, 0, 0x0b, 0); // OBJECT_TYPE_OMAP
+        seal(&mut b);
+        b
+    }
+
+    /// Build a fixed-KV omap btree leaf mapping each `(virt, xid) -> phys`.
+    fn omap_leaf(oid: u64, entries: &[(u64, u64, u64)]) -> Vec<u8> {
+        const FOOTER: usize = 40;
+        let mut b = vec![0u8; BS];
+        let flags: u16 = 0x1 | 0x2 | 0x4; // ROOT | LEAF | FIXED_KV_SIZE
+        b[32..34].copy_from_slice(&flags.to_le_bytes());
+        b[36..40].copy_from_slice(&(entries.len() as u32).to_le_bytes());
+        let toc_len = entries.len() * 4; // fixed TOC: key_offs,value_offs (u16,u16)
+        b[40..42].copy_from_slice(&0u16.to_le_bytes());
+        b[42..44].copy_from_slice(&(toc_len as u16).to_le_bytes());
+        let toc_start = 56;
+        let key_area = toc_start + toc_len;
+        let val_base = BS - FOOTER;
+        let mut key_off = 0usize;
+        let mut val_off = 0usize;
+        for (i, (virt, xid, phys)) in entries.iter().enumerate() {
+            let e = toc_start + i * 4;
+            b[e..e + 2].copy_from_slice(&(key_off as u16).to_le_bytes());
+            // omap_key { ok_oid u64, ok_xid u64 } = 16 bytes
+            let mut k = vec![0u8; 16];
+            k[0..8].copy_from_slice(&virt.to_le_bytes());
+            k[8..16].copy_from_slice(&xid.to_le_bytes());
+            let ks = key_area + key_off;
+            b[ks..ks + 16].copy_from_slice(&k);
+            // omap_val { ov_flags u32, ov_size u32, ov_paddr u64 } = 16 bytes
+            let mut v = vec![0u8; 16];
+            v[8..16].copy_from_slice(&phys.to_le_bytes());
+            let v_reversed = val_off + 16;
+            b[e + 2..e + 4].copy_from_slice(&(v_reversed as u16).to_le_bytes());
+            let vs = val_base - v_reversed;
+            b[vs..vs + 16].copy_from_slice(&v);
+            key_off += 16;
+            val_off += 16;
+        }
+        obj_hdr(&mut b, oid, 0, 0x4000_0002, 0x0b); // PHYSICAL|BTREE, omap subtype
+        seal(&mut b);
+        b
+    }
+
+    /// Assemble a block image (`Vec` of `(block_index, bytes)`) into one buffer.
+    fn image(blocks: &[(u64, Vec<u8>)]) -> Vec<u8> {
+        let max = blocks.iter().map(|(i, _)| *i).max().unwrap_or(0) as usize;
+        let mut buf = vec![0u8; (max + 1) * BS];
+        for (i, b) in blocks {
+            let off = *i as usize * BS;
+            buf[off..off + BS].copy_from_slice(b);
+        }
+        buf
+    }
+
+    /// A volume whose snap-meta tree root is a single leaf at `snap_tree_block`,
+    /// with `omap` at `omap_block_idx` (empty map — not needed for a leaf root).
+    fn single_leaf_volume(snap_records: &[(Vec<u8>, Vec<u8>)]) -> (Vec<u8>, ApfsVolume) {
+        let snap_leaf = btree_node(50, 7, true, snap_records);
+        let omap = omap_block(40, 41);
+        let omap_tree = omap_leaf(41, &[]); // no virtual nodes to resolve for a leaf root
+        let apsb_b = apsb(1026, 7, 40, 50);
+        let buf = image(&[(40, omap), (41, omap_tree), (50, snap_leaf), (1026, apsb_b)]);
+        let vol = ApfsVolume::parse(&buf[1026 * BS..1027 * BS]).expect("parse synth APSB");
+        (buf, vol)
+    }
+
+    #[test]
+    fn lists_snapshots_from_populated_leaf() {
+        use std::io::Cursor;
+        // A snap-meta leaf with two SNAP_METADATA records (xid 5, xid 9) plus a
+        // SNAP_NAME record. list_snapshots returns the two metadata records,
+        // sorted by xid; the name record is ignored by list_snapshots.
+        let records = vec![
+            (snap_jkey(1, 5), snap_meta_val(0x200, 1000, "snapA")),
+            (snap_jkey(1, 9), snap_meta_val(0x300, 2000, "snapB")),
+            (snap_name_key("snapA"), 5u64.to_le_bytes().to_vec()),
+        ];
+        let (buf, vol) = single_leaf_volume(&records);
+        let mut r = Cursor::new(buf);
+        let snaps = list_snapshots(&mut r, &vol, BS).expect("list");
+        assert_eq!(snaps.len(), 2);
+        assert_eq!(snaps[0].xid, 5);
+        assert_eq!(snaps[0].name, "snapA");
+        assert_eq!(snaps[0].sblock_oid, 0x200);
+        assert_eq!(snaps[0].create_time, 1000);
+        assert_eq!(snaps[1].xid, 9);
+        assert_eq!(snaps[1].name, "snapB");
+    }
+
+    #[test]
+    fn resolves_snap_name_from_populated_leaf() {
+        use std::io::Cursor;
+        let records = vec![
+            (snap_jkey(1, 5), snap_meta_val(0x200, 1000, "snapA")),
+            (snap_name_key("snapA"), 5u64.to_le_bytes().to_vec()),
+            (snap_name_key("snapB"), 9u64.to_le_bytes().to_vec()),
+        ];
+        let (buf, vol) = single_leaf_volume(&records);
+        let mut r = Cursor::new(buf);
+        assert_eq!(
+            resolve_snapshot_xid(&mut r, &vol, "snapB", BS).expect("resolve"),
+            Some(9)
+        );
+        assert_eq!(
+            resolve_snapshot_xid(&mut r, &vol, "snapA", BS).expect("resolve"),
+            Some(5)
+        );
+        assert_eq!(
+            resolve_snapshot_xid(&mut r, &vol, "absent", BS).expect("resolve"),
+            None
+        );
+    }
+
+    #[test]
+    fn walks_index_node_resolving_child_virtually() {
+        use std::io::Cursor;
+        // Snap-meta tree ROOT is an INDEX node (level 1) whose single child is a
+        // *virtual* oid (1500) resolved through the volume omap to a physical leaf
+        // block (60). This exercises the virtual sub-node resolve + descent path.
+        let leaf = btree_node(
+            60,
+            7,
+            true,
+            &[(snap_jkey(1, 3), snap_meta_val(0x99, 500, "s"))],
+        );
+        // Index root: one record whose value is the 8-byte child virtual oid 1500.
+        let index = btree_node(
+            50,
+            7,
+            false,
+            &[(snap_jkey(1, 3), 1500u64.to_le_bytes().to_vec())],
+        );
+        let omap = omap_block(40, 41);
+        // omap maps (virtual 1500, xid 7) -> physical block 60.
+        let omap_tree = omap_leaf(41, &[(1500, 7, 60)]);
+        let apsb_b = apsb(1026, 7, 40, 50);
+        let buf = image(&[
+            (40, omap),
+            (41, omap_tree),
+            (50, index),
+            (60, leaf),
+            (1026, apsb_b),
+        ]);
+        let vol = ApfsVolume::parse(&buf[1026 * BS..1027 * BS]).expect("parse APSB");
+        let mut r = Cursor::new(buf);
+        let snaps = list_snapshots(&mut r, &vol, BS).expect("list via index");
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].xid, 3);
+        assert_eq!(snaps[0].sblock_oid, 0x99);
+    }
+
+    #[test]
+    fn snap_tree_checksum_mismatch_is_loud() {
+        use std::io::Cursor;
+        let records = vec![(snap_jkey(1, 5), snap_meta_val(0x200, 1000, "snapA"))];
+        let (mut buf, vol) = single_leaf_volume(&records);
+        // Corrupt the snap-meta leaf (block 50) body after its checksum was sealed.
+        buf[50 * BS + 100] ^= 0xff;
+        let mut r = Cursor::new(buf);
+        let err = list_snapshots(&mut r, &vol, BS).unwrap_err();
+        assert!(
+            matches!(err, crate::ApfsError::ChecksumMismatch { .. }),
+            "a corrupted snap-meta node must fail loudly, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn snap_tree_cycle_is_rejected() {
+        use std::io::Cursor;
+        // An index root (block 50, virtual oid 50) whose child resolves back to
+        // block 50 — a cycle. The visited-set guard must reject it.
+        let index = btree_node(
+            50,
+            7,
+            false,
+            &[(snap_jkey(1, 3), 1500u64.to_le_bytes().to_vec())],
+        );
+        let omap = omap_block(40, 41);
+        // virtual 1500 -> physical 50 (the root again) => revisiting block oid 50.
+        let omap_tree = omap_leaf(41, &[(1500, 7, 50)]);
+        let apsb_b = apsb(1026, 7, 40, 50);
+        let buf = image(&[(40, omap), (41, omap_tree), (50, index), (1026, apsb_b)]);
+        let vol = ApfsVolume::parse(&buf[1026 * BS..1027 * BS]).expect("parse APSB");
+        let mut r = Cursor::new(buf);
+        let err = list_snapshots(&mut r, &vol, BS).unwrap_err();
+        assert!(
+            matches!(err, crate::ApfsError::CycleGuard { .. }),
+            "a cyclic snap-meta tree must be rejected, got {err:?}"
+        );
+    }
 }
