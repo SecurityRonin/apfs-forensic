@@ -1,21 +1,30 @@
-//! File-system record key dispatch (`j_key_t`) and extended-field (xf_blob)
-//! walking. The j_key split (top-4-bit type / low-60-bit oid) and the xf_blob
-//! TLV layout are verified verbatim against the Apple reference + libfsapfs and
-//! exercised on the REAL fs-tree fixture's records. See `tests/data/README.md`.
+//! File-system record key dispatch (`j_key_t`) and extended-field (`xf_blob`)
+//! walking. The `j_key` split (top-4-bit type / low-60-bit oid) and the
+//! `xf_blob` TLV layout are verified verbatim against the Apple reference +
+//! libfsapfs and exercised on the REAL fs-tree fixture's records. See
+//! `tests/data/README.md`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Building raw j_key words OR-es a type-shift with a readable oid; the bitwise
+// and identity-op lints fire on these deliberate constructions.
+#![allow(clippy::unusual_byte_groupings, clippy::identity_op)]
 
 use apfs_core::fsrecord::{decode_jkey, parse_xfields, RecordType};
+
+/// Build a raw `j_key.obj_id_and_type` from a 4-bit type and a 60-bit oid.
+fn jkey(ty: u64, oid: u64) -> u64 {
+    (ty << 60) | oid
+}
 
 #[test]
 fn decode_jkey_splits_type_and_oid() {
     // obj_id_and_type = (type << 60) | oid. INODE=3, oid=20.
-    let raw = (3u64 << 60) | 20;
+    let raw = jkey(3, 20);
     let (oid, ty) = decode_jkey(raw);
     assert_eq!(oid, 20);
     assert_eq!(ty, Some(RecordType::Inode));
 
     // DIR_REC=9, oid=2 (root).
-    let raw = (9u64 << 60) | 2;
+    let raw = jkey(9, 2);
     let (oid, ty) = decode_jkey(raw);
     assert_eq!(oid, 2);
     assert_eq!(ty, Some(RecordType::DirRec));
@@ -26,7 +35,7 @@ fn decode_jkey_masks_full_60_bit_oid() {
     // The oid occupies the low 60 bits; the top 4 bits are the type and must not
     // bleed into the oid.
     let oid_max = 0x0fff_ffff_ffff_ffff;
-    let raw = (8u64 << 60) | oid_max;
+    let raw = jkey(8, oid_max);
     let (oid, ty) = decode_jkey(raw);
     assert_eq!(oid, oid_max);
     assert_eq!(ty, Some(RecordType::FileExtent));
@@ -36,12 +45,12 @@ fn decode_jkey_masks_full_60_bit_oid() {
 fn decode_jkey_unknown_type_is_none() {
     // Type 0 (INVALID) and 14/15 are not defined j_obj_types -> None, but the
     // oid still decodes (fleet "show the value" — caller still sees the oid).
-    let raw = (0u64 << 60) | 7;
+    let raw = jkey(0, 7);
     let (oid, ty) = decode_jkey(raw);
     assert_eq!(oid, 7);
     assert_eq!(ty, None);
 
-    let raw = (15u64 << 60) | 7;
+    let raw = jkey(15, 7);
     let (oid, ty) = decode_jkey(raw);
     assert_eq!(oid, 7);
     assert_eq!(ty, None);
@@ -65,7 +74,7 @@ fn decode_jkey_all_defined_types() {
         (13, RecordType::FileInfo),
     ];
     for (n, expect) in cases {
-        let (oid, ty) = decode_jkey((n << 60) | 0x42);
+        let (oid, ty) = decode_jkey(jkey(n, 0x42));
         assert_eq!(oid, 0x42);
         assert_eq!(ty, Some(expect));
     }
