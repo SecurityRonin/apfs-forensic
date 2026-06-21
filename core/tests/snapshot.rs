@@ -22,7 +22,7 @@
 
 use std::io::Cursor;
 
-use apfs_core::snapshot::list_snapshots;
+use apfs_core::snapshot::{list_snapshots, resolve_snapshot_xid};
 use apfs_core::volume::ApfsVolume;
 
 const CONTENT: &[u8] = include_bytes!("../../tests/data/apfs_content.bin");
@@ -56,4 +56,16 @@ fn real_volume_exposes_snap_meta_tree_oid() {
     // (apfs_snap_meta_tree_oid @152). For the P4 fixture that is block 340.
     let vol = p4_volume();
     assert_eq!(vol.snap_meta_tree_oid(), 340);
+}
+
+#[test]
+fn real_unsnapshotted_volume_resolves_no_name() {
+    // The empty snap-meta tree has no SNAP_NAME records, so resolving any name
+    // returns None (a clean per-item miss, walked over real Apple structure —
+    // never a bootstrap error, never a panic).
+    let mut r = Cursor::new(CONTENT);
+    let vol = p4_volume();
+    let xid = resolve_snapshot_xid(&mut r, &vol, "nonexistent", BLOCK_SIZE)
+        .expect("resolve snapshot name");
+    assert_eq!(xid, None, "no snapshot named 'nonexistent' exists");
 }

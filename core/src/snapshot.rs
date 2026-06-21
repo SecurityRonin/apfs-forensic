@@ -34,6 +34,10 @@ use crate::volume::ApfsVolume;
 /// `o_subtype` of the snapshot-metadata tree (`OBJECT_TYPE_SNAPMETATREE`).
 const OBJECT_SUBTYPE_SNAPMETATREE: u32 = 0x10;
 
+// `j_snap_name_key_t`: u16 name_len @8 (after the 8-byte j_key), name @10.
+const OFF_SNAP_NAME_KEY_LEN: usize = 8;
+const OFF_SNAP_NAME_KEY_NAME: usize = 10;
+
 // `j_snap_metadata_val_t` field offsets within the value.
 const OFF_SNAP_EXTENTREF_TREE_OID: usize = 0;
 const OFF_SNAP_SBLOCK_OID: usize = 8;
@@ -114,6 +118,21 @@ pub fn list_snapshots<R: Read + Seek>(
     })?;
     out.sort_by_key(|s| s.xid);
     Ok(out)
+}
+
+/// Resolve a snapshot **name** to its xid via the snapshot-name tree records
+/// (`APFS_TYPE_SNAP_NAME`, value `j_snap_name_val_t { xid_t snap_xid }`). `None`
+/// if no snapshot of that name exists.
+///
+/// # Errors
+/// As [`list_snapshots`].
+pub fn resolve_snapshot_xid<R: Read + Seek>(
+    _reader: &mut R,
+    _volume: &ApfsVolume,
+    _name: &str,
+    _block_size: usize,
+) -> crate::Result<Option<u64>> {
+    todo!("P5 unit 2: scan SNAP_NAME records and return the snap_xid for a name")
 }
 
 /// Walk the snapshot-metadata tree, invoking `visit(key, value)` for every leaf
@@ -244,6 +263,19 @@ where
     Ok(())
 }
 
+/// Decode a `j_snap_name_key_t` name from a snap-name record key (u16 `name_len`
+/// @8, name @10). `None` if the length is zero or runs past the key (never
+/// over-reads).
+fn decode_snap_name_key(key: &[u8]) -> Option<String> {
+    let name_len =
+        (crate::bytes::le_u16(key, OFF_SNAP_NAME_KEY_LEN) as usize).min(MAX_SNAP_NAME_LEN);
+    if name_len == 0 {
+        return None;
+    }
+    key.get(OFF_SNAP_NAME_KEY_NAME..OFF_SNAP_NAME_KEY_NAME + name_len)
+        .map(decode_cstr)
+}
+
 /// Decode a NUL-terminated UTF-8 byte string (the snapshot name form).
 fn decode_cstr(data: &[u8]) -> String {
     let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
@@ -303,5 +335,35 @@ mod tests {
     #[test]
     fn snap_meta_tree_subtype_is_snapmetatree() {
         assert_eq!(snap_meta_tree_subtype(), 0x10);
+    }
+
+    /// Build an 8-byte `j_key` header word from a 4-bit type and a 60-bit oid.
+    fn jkey(ty: u64, oid: u64) -> [u8; 8] {
+        ((ty << 60) | oid).to_le_bytes()
+    }
+
+    #[test]
+    fn decode_snap_name_key_reads_name() {
+        // j_snap_name_key_t: j_key (SNAP_NAME=11) + name_len u16 @8 + name @10.
+        let mut key = Vec::new();
+        key.extend_from_slice(&jkey(11, 0)); // snap-name keys carry oid 0
+        key.extend_from_slice(&6u16.to_le_bytes()); // name_len = 6 ("snap1\0")
+        key.extend_from_slice(b"snap1\0");
+        assert_eq!(decode_snap_name_key(&key).as_deref(), Some("snap1"));
+    }
+
+    #[test]
+    fn decode_snap_name_key_rejects_zero_and_overlong() {
+        // name_len 0 -> None; name_len past the key -> None (no over-read).
+        let mut zero = Vec::new();
+        zero.extend_from_slice(&jkey(11, 0));
+        zero.extend_from_slice(&0u16.to_le_bytes());
+        assert_eq!(decode_snap_name_key(&zero), None);
+
+        let mut overlong = Vec::new();
+        overlong.extend_from_slice(&jkey(11, 0));
+        overlong.extend_from_slice(&200u16.to_le_bytes());
+        overlong.extend_from_slice(b"z");
+        assert_eq!(decode_snap_name_key(&overlong), None);
     }
 }
