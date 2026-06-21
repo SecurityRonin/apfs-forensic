@@ -112,6 +112,13 @@ pub enum ApfsError {
     /// implemented — fail loud rather than mis-read a tree oid as a base address.
     #[error("checkpoint {area} area is tree-backed; B-tree resolution not yet implemented")]
     CheckpointTreeUnsupported { area: &'static str },
+    /// A transparently-compressed file's `com.apple.decmpfs` payload could not be
+    /// decoded — a named codec/format failure (unknown/unsupported compression
+    /// type, malformed header, codec rejection, or a length mismatch). The reader
+    /// **refuses** rather than returning plausible-but-wrong bytes (fail-loud:
+    /// fabricating file content in a forensic tool is the worst failure).
+    #[error("decmpfs decode failure: {0}")]
+    Decmpfs(&'static str),
 }
 
 /// Result alias for the crate.

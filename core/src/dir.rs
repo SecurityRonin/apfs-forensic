@@ -100,7 +100,11 @@ fn parse_dir_entry(key: &[u8], value: &[u8]) -> Option<DirEntry> {
 /// resolved to a physical block via the omap at the volume's xid, the node's
 /// Fletcher-64 checksum is verified before its TOC is trusted, the descent depth
 /// is capped, and a visited-set guards against cyclic node oids.
-fn for_each_fs_record<R, F>(
+///
+/// `pub(crate)` so the extent/xattr readers ([`crate::extent`], [`crate::xattr`])
+/// scan the same fs-tree for `FILE_EXTENT`/`XATTR` records without duplicating the
+/// omap-resolution + checksum/cycle-guard walk.
+pub(crate) fn for_each_fs_record<R, F>(
     reader: &mut R,
     volume: &ApfsVolume,
     block_size: usize,
