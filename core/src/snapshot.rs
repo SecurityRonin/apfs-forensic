@@ -127,12 +127,26 @@ pub fn list_snapshots<R: Read + Seek>(
 /// # Errors
 /// As [`list_snapshots`].
 pub fn resolve_snapshot_xid<R: Read + Seek>(
-    _reader: &mut R,
-    _volume: &ApfsVolume,
-    _name: &str,
-    _block_size: usize,
+    reader: &mut R,
+    volume: &ApfsVolume,
+    name: &str,
+    block_size: usize,
 ) -> crate::Result<Option<u64>> {
-    todo!("P5 unit 2: scan SNAP_NAME records and return the snap_xid for a name")
+    let mut found = None;
+    for_each_snap_record(reader, volume, block_size, &mut |key, value| {
+        if found.is_some() {
+            return;
+        }
+        let (_oid, ty) = decode_jkey(crate::bytes::le_u64(key, 0));
+        if ty != Some(RecordType::SnapName) {
+            return;
+        }
+        if decode_snap_name_key(key).as_deref() == Some(name) {
+            // j_snap_name_val_t { xid_t snap_xid } — the xid is the whole value.
+            found = Some(crate::bytes::le_u64(value, 0));
+        }
+    })?;
+    Ok(found)
 }
 
 /// Walk the snapshot-metadata tree, invoking `visit(key, value)` for every leaf
