@@ -80,6 +80,17 @@ pub enum ApfsError {
     /// An object map could not resolve a virtual oid at the requested xid.
     #[error("omap could not resolve virtual oid {oid:#x} at xid {xid}")]
     OmapUnresolved { oid: u64, xid: u64 },
+    /// A block did not carry the expected object type — a short block, a
+    /// wrong-typed object, or corruption. Carries the offending raw `o_type`
+    /// (fleet "show the unrecognized value" rule).
+    #[error(
+        "unexpected object type in {structure}: expected {expected:#06x}, found {found:#010x}"
+    )]
+    UnexpectedObjectType {
+        structure: &'static str,
+        expected: u32,
+        found: u32,
+    },
     /// A Fusion container was encountered but Fusion address translation is not
     /// yet supported — fail loud rather than mis-read physical addresses.
     #[error("unsupported Fusion container (tier-2 device present); Fusion addressing not yet implemented")]
