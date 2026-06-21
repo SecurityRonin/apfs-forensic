@@ -71,29 +71,40 @@ const MAX_BTN_NKEYS: u32 = 1 << 20;
 #[non_exhaustive]
 pub enum BTreeSubtype {
     /// Object map (`OBJECT_TYPE_OMAP`): `omap_key_t` (16) → `omap_val_t` (16) at
-    /// a leaf; a branch value is an 8-byte child block number.
+    /// a leaf; a branch value is an 8-byte child block number. A **fixed-KV**
+    /// tree, so the per-entry sizes below are consulted.
     Omap,
+    /// File-system tree (`FSTREE`): `j_key`-keyed records of varying length. A
+    /// **variable-KV** tree — the TOC carries the per-entry key/value sizes, so
+    /// the fixed sizes below are *not* consulted for leaves; for an index node a
+    /// branch value is an 8-byte child object id (virtual, resolved through the
+    /// volume omap by the caller).
+    FsTree,
 }
 
 impl BTreeSubtype {
-    /// Fixed key length for a **leaf** entry of this subtype.
+    /// Fixed key length for a **leaf** entry of this subtype (fixed-KV trees only;
+    /// variable-KV trees read the length from the TOC and ignore this).
     pub(crate) const fn fixed_key_len(self) -> usize {
         match self {
-            BTreeSubtype::Omap => 16, // omap_key_t { ok_oid u64, ok_xid u64 }
+            BTreeSubtype::Omap => 16,  // omap_key_t { ok_oid u64, ok_xid u64 }
+            BTreeSubtype::FsTree => 0, // variable-KV: TOC carries the length
         }
     }
 
-    /// Fixed value length for a **leaf** entry of this subtype.
+    /// Fixed value length for a **leaf** entry of this subtype (fixed-KV only).
     pub(crate) const fn fixed_leaf_val_len(self) -> usize {
         match self {
-            BTreeSubtype::Omap => 16, // omap_val_t { ov_flags, ov_size, ov_paddr }
+            BTreeSubtype::Omap => 16,  // omap_val_t { ov_flags, ov_size, ov_paddr }
+            BTreeSubtype::FsTree => 0, // variable-KV: TOC carries the length
         }
     }
 
-    /// Fixed value length for a **branch** (index) entry: a child block number.
+    /// Fixed value length for a **branch** (index) entry: an 8-byte child oid
+    /// (block number for a physical tree, virtual oid for the fs-tree).
     pub(crate) const fn fixed_branch_val_len(self) -> usize {
         match self {
-            BTreeSubtype::Omap => 8, // child paddr (block number)
+            BTreeSubtype::Omap | BTreeSubtype::FsTree => 8,
         }
     }
 }
