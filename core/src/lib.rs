@@ -112,30 +112,79 @@ pub type Result<T> = std::result::Result<T, ApfsError>;
 /// (highest valid xid, checksum + magic validated before trust), resolves the
 /// container object map, and enumerates volumes.
 pub struct ApfsContainer<R: Read + Seek> {
-    _reader: R,
-    // checkpoint-resolved live superblock, container omap, block size, … (stub)
+    reader: R,
+    /// The live container superblock (highest valid xid in the checkpoint ring),
+    /// magic + Fletcher-64 validated before it was trusted.
+    superblock: container::NxSuperblock,
+    /// Block address of the live superblock within the checkpoint descriptor area.
+    live_superblock_paddr: u64,
 }
 
 impl<R: Read + Seek> ApfsContainer<R> {
     /// Open a container from a `Read + Seek` source, validating the bootstrap.
     ///
+    /// Reads block zero (a copy of the container superblock; Apple "Mounting an
+    /// APFS Partition" step 1), validates its magic + Fletcher-64, walks the
+    /// checkpoint descriptor ring to the live superblock (highest valid xid),
+    /// and re-reads that superblock as the live container state.
+    ///
     /// # Errors
-    /// [`ApfsError::NoValidSuperblock`] if the checkpoint ring holds no
-    /// cksum-valid, correctly-magicked NXSB; [`ApfsError::UnsupportedFusion`]
-    /// for Fusion containers.
-    pub fn open(_reader: R) -> Result<Self> {
-        todo!("P1: parse NXSB, walk checkpoint ring to live superblock, resolve container omap")
+    /// [`ApfsError::NoValidSuperblock`] if block zero is malformed or the
+    /// checkpoint ring holds no cksum-valid, correctly-magicked NXSB;
+    /// [`ApfsError::CheckpointTreeUnsupported`] for a tree-backed descriptor
+    /// area (phase P2); [`ApfsError::Io`] on a read/seek failure.
+    pub fn open(mut reader: R) -> Result<Self> {
+        // Read block zero. Block size is not yet known, so read the minimum APFS
+        // block — block zero's geometry fields all sit within the first 4 KiB.
+        let mut block0 = vec![0u8; container::NX_MINIMUM_BLOCK_SIZE as usize];
+        reader.seek(std::io::SeekFrom::Start(0))?;
+        match reader.read_exact(&mut block0) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Err(ApfsError::NoValidSuperblock {
+                    checked: 0,
+                    last_magic: 0,
+                });
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        // Parse + validate the block-zero bootstrap superblock (magic + cksum).
+        let bootstrap = container::NxSuperblock::parse(&block0)?;
+
+        // Walk the checkpoint ring to the live superblock.
+        let live = checkpoint::resolve_live_checkpoint(&mut reader, &bootstrap)?;
+
+        // Re-read the chosen superblock as the authoritative live state.
+        let block_size = bootstrap.block_size as usize;
+        let mut buf = vec![0u8; block_size];
+        let offset = live.superblock_paddr.saturating_mul(block_size as u64);
+        reader.seek(std::io::SeekFrom::Start(offset))?;
+        reader.read_exact(&mut buf)?;
+        let superblock = container::NxSuperblock::parse(&buf)?;
+
+        Ok(Self {
+            reader,
+            superblock,
+            live_superblock_paddr: live.superblock_paddr,
+        })
     }
 
-    /// Iterate the volumes (APSB) in this container.
+    /// The live container superblock resolved from the checkpoint ring.
     #[must_use]
-    pub fn volumes(&self) -> Vec<volume::ApfsVolume> {
-        todo!("P3: enumerate volume superblocks via container omap")
+    pub fn superblock(&self) -> &container::NxSuperblock {
+        &self.superblock
     }
 
-    /// Iterate the container-level snapshots.
+    /// Block address of the live superblock within the checkpoint descriptor area.
     #[must_use]
-    pub fn snapshots(&self) -> Vec<snapshot::Snapshot> {
-        todo!("P5: walk the snapshot metadata tree")
+    pub fn live_superblock_paddr(&self) -> u64 {
+        self.live_superblock_paddr
+    }
+
+    /// Consume the container, returning the underlying reader.
+    #[must_use]
+    pub fn into_reader(self) -> R {
+        self.reader
     }
 }
