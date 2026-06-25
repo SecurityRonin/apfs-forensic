@@ -29,6 +29,10 @@ pub mod timestamps;
 use forensicnomicon::report::Observation;
 pub use forensicnomicon::report::{Category, Finding, Severity, Source};
 
+/// Audit result — errors are `apfs_core` read/parse failures surfaced loudly
+/// (never swallowed into an empty finding set).
+pub type Result<T> = std::result::Result<T, apfs_core::ApfsError>;
+
 /// The APFS-specific anomalies this analyzer can surface. Each variant maps to a
 /// published, scheme-prefixed SCREAMING-KEBAB `code` (never changed once
 /// shipped; new variants get new codes).
