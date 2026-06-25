@@ -31,9 +31,9 @@ const CHUNK_INFO_LEN: usize = 32;
 // `chunk_info_t` field offsets.
 const CI_BITMAP_ADDR: usize = 24; // u64 — SPACEMAN_BITMAP paddr, or 0 if all-free
 
-/// Read a block at `paddr` and verify its Fletcher-64 before trusting it (the
-/// spaceman and CIB are checksummed `obj_phys` objects).
-fn read_obj_block<R: Read + Seek>(
+/// Read a block at `paddr` and verify its Fletcher-64 before trusting it (a
+/// checksummed `obj_phys` object: spaceman, CIB, reaper, reap list).
+pub(crate) fn read_obj_block<R: Read + Seek>(
     reader: &mut R,
     paddr: u64,
     block_size: usize,
