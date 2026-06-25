@@ -11,10 +11,17 @@
 //! tag, a bad magic, an oid/xid) MUST carry the raw offending value + location
 //! in their evidence (fleet "show the unrecognized value" rule).
 //!
-//! # Scaffold notice
+//! # Coverage
 //!
-//! Design skeleton; `audit_*` bodies are `todo!()` stubs reflecting
-//! `docs/plans/2026-06-21-apfs-forensic-design.md`.
+//! Implements the P9 audits of `docs/plans/2026-06-21-apfs-forensic-design.md`:
+//! integrity (XID-REUSE), snapshots (name↔metadata + xid ordering), recovery
+//! (reaper-pending), encryption-state surfacing, broken-seal detection, and
+//! clone-finding logic, driven by [`audit_container`] / [`audit_volume`]. The
+//! fixture-dependent leads documented in the design — sealed-volume hash
+//! recomputation (needs a real SSV), extent-reference shared-block detection
+//! (needs the extentref reader + a clone corpus), and the broader
+//! superseded-checkpoint / orphan-inode recovery leads — are scoped to land with
+//! their validating corpora rather than guess.
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -258,18 +265,66 @@ impl Observation for AnomalyKind {
     }
 }
 
-/// Audit a whole container (checksum/omap/checkpoint integrity, volumes, snapshots).
-#[must_use]
-pub fn audit_container<R: std::io::Read + std::io::Seek>(
-    _container: &apfs_core::ApfsContainer<R>,
-) -> Vec<AnomalyKind> {
-    todo!("P9: drive integrity/recovery/snapshot/crypto audits across the container")
+/// Read a checksum-agnostic raw block at `paddr`.
+fn read_block<R: std::io::Read + std::io::Seek>(
+    reader: &mut R,
+    paddr: u64,
+    block_size: usize,
+) -> Result<Vec<u8>> {
+    let mut buf = vec![0u8; block_size];
+    reader.seek(std::io::SeekFrom::Start(
+        paddr.saturating_mul(block_size as u64),
+    ))?;
+    reader.read_exact(&mut buf)?;
+    Ok(buf)
 }
 
-/// Audit a single volume.
-#[must_use]
-pub fn audit_volume(_volume: &apfs_core::volume::ApfsVolume) -> Vec<AnomalyKind> {
-    todo!("P9")
+/// Audit a whole container: open it, run the container-level integrity audit,
+/// then every volume ([`audit_volume`]) and the reaper recovery audit. Reads
+/// through `reader` (the same source the container was opened over), so the
+/// caller need not pre-open — pass the image reader and block size.
+///
+/// # Errors
+/// Surfaces an [`apfs_core::ApfsError`] from opening the container or reading any
+/// audited structure (never swallowed into an empty result).
+pub fn audit_container<R: std::io::Read + std::io::Seek>(
+    reader: &mut R,
+    block_size: usize,
+) -> Result<Vec<AnomalyKind>> {
+    let mut container = apfs_core::ApfsContainer::open(&mut *reader)?;
+    let mut out = integrity::audit(&container);
+    let mappings = container.checkpoint_mappings().to_vec();
+    let reaper_paddr = container.reaper_paddr();
+    let apsb_addrs = container.volume_superblock_addrs()?;
+    drop(container); // release the borrow on `reader` for the read-based audits
+
+    for paddr in apsb_addrs {
+        let block = read_block(reader, paddr, block_size)?;
+        if let Ok(volume) = apfs_core::volume::ApfsVolume::parse(&block) {
+            out.extend(audit_volume(reader, &volume, block_size)?);
+        }
+    }
+    if let Some(rp) = reaper_paddr {
+        out.extend(recovery::audit(reader, rp, &mappings, block_size)?);
+    }
+    Ok(out)
+}
+
+/// Audit a single volume: snapshot consistency ([`snapshots::audit`]) and clone
+/// relationships ([`clones::audit`]). Per-inode timestamp leads
+/// ([`timestamps::audit`]) and encryption/sealed audits are driven by callers
+/// that hold the relevant inode / state / integrity-metadata.
+///
+/// # Errors
+/// Surfaces an [`apfs_core::ApfsError`] from reading the volume's trees.
+pub fn audit_volume<R: std::io::Read + std::io::Seek>(
+    reader: &mut R,
+    volume: &apfs_core::volume::ApfsVolume,
+    block_size: usize,
+) -> Result<Vec<AnomalyKind>> {
+    let mut out = snapshots::audit(reader, volume, block_size)?;
+    out.extend(clones::audit(reader, volume));
+    Ok(out)
 }
 
 #[cfg(test)]
