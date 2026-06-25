@@ -176,7 +176,7 @@ fn populated_fixture_point_in_time_read() {
             continue;
         };
         let snaps = list_snapshots(&mut r, &vol, BLOCK_SIZE).unwrap_or_default();
-        if best.as_ref().map_or(true, |(_, b)| snaps.len() > b.len()) {
+        if best.as_ref().is_none_or(|(_, b)| snaps.len() > b.len()) {
             best = Some((vol, snaps));
         }
     }
@@ -197,7 +197,8 @@ fn populated_fixture_point_in_time_read() {
     use apfs_core::dir::open_path;
     use apfs_core::extent::read_data;
     let snap_v1 = snaps.iter().min_by_key(|s| s.xid).expect("snapshot");
-    let snap_vol = mount_snapshot(&mut r, snap_v1, BLOCK_SIZE).expect("mount earliest snapshot");
+    let snap_vol =
+        mount_snapshot(&mut r, &live, snap_v1, BLOCK_SIZE).expect("mount earliest snapshot");
     let v1_inode = open_path(&mut r, &snap_vol, &file, BLOCK_SIZE).expect("open v1 file");
     let v1 = read_data(&mut r, &snap_vol, &v1_inode, BLOCK_SIZE).expect("read v1");
     let live_inode = open_path(&mut r, &live, &file, BLOCK_SIZE).expect("open live file");

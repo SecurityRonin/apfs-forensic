@@ -150,11 +150,18 @@ pub fn resolve_snapshot_xid<R: Read + Seek>(
 }
 
 /// Mount a snapshot as a point-in-time [`ApfsVolume`]: read the volume
-/// superblock (APSB) frozen at `snapshot.sblock_oid` and parse it. The returned
-/// volume carries the snapshot's own omap, root fs-tree oid, and xid, so the
-/// existing [`crate::dir`] / [`crate::extent`] navigation reads the volume
-/// exactly as it stood at snapshot time — the volume omap resolves fs-tree oids
-/// picking the entry with `ok_xid` ≤ the snapshot's xid.
+/// superblock (APSB) frozen at `snapshot.sblock_oid`, parse it, and graft the
+/// **live** volume's object map onto it.
+///
+/// A snapshot's frozen `apfs_superblock_t` carries `apfs_omap_oid == 0` —
+/// snapshots have no object map of their own; their fs-tree is read through the
+/// containing volume's omap, resolved at the snapshot's `xid` (the omap B-tree
+/// retains the historical `(oid, xid) → paddr` mappings a snapshot pins). The
+/// returned volume therefore keeps the frozen superblock's `root_tree_oid` and
+/// `xid` but borrows `live_volume`'s `omap_oid`, so the existing [`crate::dir`]
+/// / [`crate::extent`] navigation reads the volume exactly as it stood at
+/// snapshot time. (Without the graft, navigation would read the snapshot's
+/// `omap_oid == 0`, i.e. block 0 — the container superblock — and fail.)
 ///
 /// # Errors
 /// [`crate::ApfsError::UnexpectedObjectType`] if `sblock_oid` does not point at a
@@ -162,6 +169,7 @@ pub fn resolve_snapshot_xid<R: Read + Seek>(
 /// failure; [`crate::ApfsError::Io`] on a read/seek failure.
 pub fn mount_snapshot<R: Read + Seek>(
     reader: &mut R,
+    live_volume: &ApfsVolume,
     snapshot: &Snapshot,
     block_size: usize,
 ) -> crate::Result<ApfsVolume> {
@@ -169,7 +177,7 @@ pub fn mount_snapshot<R: Read + Seek>(
     let offset = snapshot.sblock_oid.saturating_mul(block_size as u64);
     reader.seek(std::io::SeekFrom::Start(offset))?;
     reader.read_exact(&mut buf)?;
-    ApfsVolume::parse(&buf)
+    Ok(ApfsVolume::parse(&buf)?.with_omap_oid(live_volume.omap_oid()))
 }
 
 /// Walk the snapshot-metadata tree, invoking `visit(key, value)` for every leaf
@@ -431,32 +439,59 @@ mod tests {
     fn mount_snapshot_reads_sblock_as_volume() {
         use std::io::Cursor;
         let mut r = Cursor::new(P4_CONTENT);
-        // A snapshot whose sblock_oid is the live APSB block 438.
-        let snap = snapshot_pointing_at(P4_APSB_BLOCK);
-        let mounted = mount_snapshot(&mut r, &snap, P4_BLOCK_SIZE).expect("mount snapshot");
-
-        // The "mounted" volume must equal a direct parse of block 438 — same
-        // omap, root tree, xid, and name. This is the point-in-time seam: an
-        // sblock_oid resolves to a full navigable ApfsVolume.
+        // The live volume is block 438; a snapshot whose sblock_oid is also 438
+        // mounts to the same superblock with the live omap grafted on.
         let start = P4_APSB_BLOCK as usize * P4_BLOCK_SIZE;
-        let direct = ApfsVolume::parse(&P4_CONTENT[start..start + P4_BLOCK_SIZE])
-            .expect("parse APSB directly");
-        assert_eq!(mounted.oid(), direct.oid());
-        assert_eq!(mounted.xid(), direct.xid());
-        assert_eq!(mounted.omap_oid(), direct.omap_oid());
-        assert_eq!(mounted.root_tree_oid(), direct.root_tree_oid());
-        assert_eq!(mounted.name(), direct.name());
+        let live =
+            ApfsVolume::parse(&P4_CONTENT[start..start + P4_BLOCK_SIZE]).expect("parse live APSB");
+        let snap = snapshot_pointing_at(P4_APSB_BLOCK);
+        let mounted = mount_snapshot(&mut r, &live, &snap, P4_BLOCK_SIZE).expect("mount snapshot");
+
+        // The frozen superblock supplies oid/xid/root-tree/name; the live omap is
+        // grafted on (here identical to the block's own, since live == the block).
+        assert_eq!(mounted.oid(), live.oid());
+        assert_eq!(mounted.xid(), live.xid());
+        assert_eq!(mounted.omap_oid(), live.omap_oid());
+        assert_eq!(mounted.root_tree_oid(), live.root_tree_oid());
+        assert_eq!(mounted.name(), live.name());
         assert_eq!(mounted.name(), "APFSP4");
+    }
+
+    #[test]
+    fn mount_snapshot_grafts_live_omap_over_snapshot_zero() {
+        use std::io::Cursor;
+        // A real snapshot superblock has apfs_omap_oid == 0; mount_snapshot must
+        // graft the live volume's omap so the point-in-time view is navigable
+        // (resolving block 0 — the container superblock — would fail). Block 438
+        // has a non-zero omap; grafting a distinct live omap must take effect.
+        let mut r = Cursor::new(P4_CONTENT);
+        let start = P4_APSB_BLOCK as usize * P4_BLOCK_SIZE;
+        let block438 =
+            ApfsVolume::parse(&P4_CONTENT[start..start + P4_BLOCK_SIZE]).expect("parse APSB");
+        let live = block438.clone().with_omap_oid(999_111);
+        let snap = snapshot_pointing_at(P4_APSB_BLOCK);
+        let mounted = mount_snapshot(&mut r, &live, &snap, P4_BLOCK_SIZE).expect("mount snapshot");
+        assert_eq!(
+            mounted.omap_oid(),
+            999_111,
+            "the live volume's omap must be grafted onto the snapshot view"
+        );
+        // The frozen identity fields still come from the snapshot's own block.
+        assert_eq!(mounted.xid(), block438.xid());
+        assert_eq!(mounted.root_tree_oid(), block438.root_tree_oid());
     }
 
     #[test]
     fn mount_snapshot_rejects_non_apsb_block() {
         use std::io::Cursor;
         let mut r = Cursor::new(P4_CONTENT);
+        let start = P4_APSB_BLOCK as usize * P4_BLOCK_SIZE;
+        let live =
+            ApfsVolume::parse(&P4_CONTENT[start..start + P4_BLOCK_SIZE]).expect("parse live APSB");
         // Block 0 is the container superblock (NXSB), not a volume APSB; mounting
         // it must fail loudly with UnexpectedObjectType, never silently succeed.
         let snap = snapshot_pointing_at(0);
-        let err = mount_snapshot(&mut r, &snap, P4_BLOCK_SIZE).unwrap_err();
+        let err = mount_snapshot(&mut r, &live, &snap, P4_BLOCK_SIZE).unwrap_err();
         assert!(
             matches!(err, crate::ApfsError::UnexpectedObjectType { .. }),
             "mounting a non-APSB block must fail loudly, got {err:?}"

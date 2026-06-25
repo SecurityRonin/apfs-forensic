@@ -210,6 +210,21 @@ impl ApfsVolume {
         self.omap_oid
     }
 
+    /// Return this volume superblock with its `omap_oid` replaced.
+    ///
+    /// A *snapshot's* frozen `apfs_superblock_t` carries `apfs_omap_oid == 0`:
+    /// snapshots have no object map of their own and are read through the
+    /// **live** volume's omap, resolved at the snapshot's `xid` (the omap B-tree
+    /// retains historical `(oid, xid) → paddr` mappings that snapshots pin). A
+    /// point-in-time view therefore keeps the frozen superblock's `root_tree_oid`
+    /// and `xid` but borrows the live volume's omap. See
+    /// [`crate::snapshot::mount_snapshot`].
+    #[must_use]
+    pub fn with_omap_oid(mut self, omap_oid: u64) -> Self {
+        self.omap_oid = omap_oid;
+        self
+    }
+
     /// `apfs_root_tree_oid` — the **virtual** oid of the file-system tree root
     /// (`FSTREE`). Resolve it through the volume omap ([`Self::omap_oid`]) at
     /// [`Self::xid`] to get the root node's physical block address.
