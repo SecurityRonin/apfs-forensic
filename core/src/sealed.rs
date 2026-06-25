@@ -35,3 +35,47 @@ impl IntegrityMeta {
         todo!("P8: decode integrity_meta_phys_t (parse only)")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a checksum-valid `integrity_meta_phys_t` block: fields after the
+    /// 32-byte obj_phys header — im_version@32, im_flags@36, im_hash_type@40,
+    /// im_root_hash_offset@44, im_broken_xid@48 (u64).
+    fn integrity_block(version: u32, flags: u32, hash_type: u32, broken_xid: u64) -> Vec<u8> {
+        let mut b = vec![0u8; 4096];
+        b[32..36].copy_from_slice(&version.to_le_bytes());
+        b[36..40].copy_from_slice(&flags.to_le_bytes());
+        b[40..44].copy_from_slice(&hash_type.to_le_bytes());
+        b[48..56].copy_from_slice(&broken_xid.to_le_bytes());
+        let cks = crate::object::fletcher64_checksum(&b);
+        b[0..8].copy_from_slice(&cks.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn parses_fields_including_broken_xid() {
+        // im_hash_type 1 = SHA-256 (APFS_HASH_SHA256); seal broken at xid 42.
+        let block = integrity_block(1, 0, 1, 42);
+        let im = IntegrityMeta::parse(&block).expect("parse integrity_meta");
+        assert_eq!(im.version, 1);
+        assert_eq!(im.hash_type, 1);
+        assert_eq!(im.broken_xid, 42);
+    }
+
+    #[test]
+    fn unbroken_seal_has_zero_broken_xid() {
+        let block = integrity_block(1, 0, 1, 0);
+        let im = IntegrityMeta::parse(&block).expect("parse");
+        assert_eq!(im.broken_xid, 0);
+    }
+
+    #[test]
+    fn rejects_corrupted_block() {
+        // A bad Fletcher-64 must fail loud (checksum-before-trust), never parse.
+        let mut block = integrity_block(1, 0, 1, 0);
+        block[100] ^= 0xff;
+        assert!(IntegrityMeta::parse(&block).is_err());
+    }
+}
