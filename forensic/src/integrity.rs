@@ -34,8 +34,20 @@ pub fn audit<R: std::io::Read + std::io::Seek>(
 /// Pure logic (Humble Object): flag any object id that the live checkpoint map
 /// resolves to two distinct blocks — two live objects claiming the same
 /// `(oid, xid)`, impossible under copy-on-write.
-fn duplicate_oid_anomalies(_mappings: &[(u64, u64)], _live_xid: u64) -> Vec<AnomalyKind> {
-    Vec::new() // RED stub
+fn duplicate_oid_anomalies(mappings: &[(u64, u64)], live_xid: u64) -> Vec<AnomalyKind> {
+    let mut out = Vec::new();
+    for i in 0..mappings.len() {
+        let (oid, paddr) = mappings[i];
+        // Reported once, on the first sighting of a colliding oid.
+        let already = mappings[..i].iter().any(|&(o, _)| o == oid);
+        let collides = mappings[i + 1..]
+            .iter()
+            .any(|&(o, p)| o == oid && p != paddr);
+        if !already && collides {
+            out.push(AnomalyKind::XidReuse { oid, xid: live_xid });
+        }
+    }
+    out
 }
 
 #[cfg(test)]
