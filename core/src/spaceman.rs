@@ -15,6 +15,7 @@ pub fn is_block_free<R: std::io::Read + std::io::Seek>(
     _reader: &mut R,
     _spaceman_paddr: u64,
     _block: u64,
+    _block_size: usize,
 ) -> crate::Result<bool> {
     todo!("P6: resolve CAB/CIB chain, read allocation bitmap bit for `block`")
 }
