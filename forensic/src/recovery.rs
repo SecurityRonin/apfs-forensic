@@ -13,10 +13,52 @@
 
 use crate::AnomalyKind;
 
-/// Surface deleted-record recovery leads.
-#[must_use]
+/// Surface deleted-but-present recovery leads from the reaper queue.
+///
+/// Objects queued in the reaper are logically deleted but still physically
+/// present (`APFS-REAPER-PENDING-OBJECT`). The further recovery leads in the
+/// design — superseded-checkpoint inodes (`APFS-DELETED-INODE-RECOVERABLE`),
+/// free-marked extent blocks (`APFS-DELETED-EXTENT-CARVE-CANDIDATE`), and orphan
+/// inodes (`APFS-ORPHAN-INODE`) — require an independent oracle (a real image or
+/// pre-delete capture + `apfsck`) to validate without false positives, so they
+/// are layered in as that corpus becomes available.
+///
+/// `reaper_paddr` and `mappings` come from the open container
+/// ([`apfs_core::ApfsContainer::reaper_paddr`] /
+/// [`apfs_core::ApfsContainer::checkpoint_mappings`]).
+///
+/// # Errors
+/// Surfaces an [`apfs_core::ApfsError`] from reading the reaper.
 pub fn audit<R: std::io::Read + std::io::Seek>(
-    _container: &apfs_core::ApfsContainer<R>,
-) -> Vec<AnomalyKind> {
-    todo!("P9: scan superseded checkpoints, reaper queue, free-extent candidates, orphans")
+    reader: &mut R,
+    reaper_paddr: u64,
+    mappings: &[apfs_core::checkpoint::CheckpointMapping],
+    block_size: usize,
+) -> crate::Result<Vec<AnomalyKind>> {
+    let pending = apfs_core::reaper::pending_objects(reader, reaper_paddr, mappings, block_size)?;
+    let oids: Vec<u64> = pending.iter().map(|p| p.oid).collect();
+    Ok(reaper_anomalies(&oids))
+}
+
+/// Pure mapping (Humble Object): each reaper-pending object id → a Low
+/// `APFS-REAPER-PENDING-OBJECT` residue lead.
+fn reaper_anomalies(_pending_oids: &[u64]) -> Vec<AnomalyKind> {
+    Vec::new() // RED stub
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_pending_objects_is_clean() {
+        assert!(reaper_anomalies(&[]).is_empty());
+    }
+
+    #[test]
+    fn pending_objects_become_residue_leads() {
+        let v = reaper_anomalies(&[500, 600]);
+        assert_eq!(v.len(), 2);
+        assert!(v.iter().all(|a| a.code() == "APFS-REAPER-PENDING-OBJECT"));
+    }
 }
