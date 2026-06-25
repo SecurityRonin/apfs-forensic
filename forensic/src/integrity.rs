@@ -8,10 +8,59 @@
 
 use crate::AnomalyKind;
 
-/// Verify object checksums and map consistency across a container.
+/// Verify structural integrity of an open container.
+///
+/// Checks the live checkpoint map for a reused object id (the same `cpm_oid`
+/// mapped to two different blocks within one checkpoint is impossible under
+/// copy-on-write → `APFS-XID-REUSE`). Note that a structurally malformed
+/// checkpoint ring is already rejected loudly by `ApfsContainer::open`, so a
+/// successfully-opened container has a valid ring. Full object-graph Fletcher-64
+/// re-verification and omap target-type/xid agreement require a reader-bearing
+/// pass over every object (the live superblock's checksum is verified at open);
+/// they are layered in [`crate::audit_container`].
 #[must_use]
 pub fn audit<R: std::io::Read + std::io::Seek>(
-    _container: &apfs_core::ApfsContainer<R>,
+    container: &apfs_core::ApfsContainer<R>,
 ) -> Vec<AnomalyKind> {
-    todo!("P9: cksum verify, omap target type/xid agreement, ring structure, xid reuse")
+    let live_xid = container.superblock().xid;
+    let mappings: Vec<(u64, u64)> = container
+        .checkpoint_mappings()
+        .iter()
+        .map(|m| (m.oid, m.paddr))
+        .collect();
+    duplicate_oid_anomalies(&mappings, live_xid)
+}
+
+/// Pure logic (Humble Object): flag any object id that the live checkpoint map
+/// resolves to two distinct blocks — two live objects claiming the same
+/// `(oid, xid)`, impossible under copy-on-write.
+fn duplicate_oid_anomalies(_mappings: &[(u64, u64)], _live_xid: u64) -> Vec<AnomalyKind> {
+    Vec::new() // RED stub
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unique_oids_are_clean() {
+        let maps = [(1u64, 10u64), (2, 11), (3, 12)];
+        assert!(duplicate_oid_anomalies(&maps, 5).is_empty());
+    }
+
+    #[test]
+    fn same_oid_two_blocks_is_xid_reuse() {
+        // oid 1 mapped to both block 10 and block 99 within one checkpoint.
+        let maps = [(1u64, 10u64), (2, 11), (1, 99)];
+        let v = duplicate_oid_anomalies(&maps, 7);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].code(), "APFS-XID-REUSE");
+    }
+
+    #[test]
+    fn same_oid_same_block_is_not_flagged() {
+        // A duplicate identical mapping is not a contradiction.
+        let maps = [(1u64, 10u64), (1, 10)];
+        assert!(duplicate_oid_anomalies(&maps, 7).is_empty());
+    }
 }
