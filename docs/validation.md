@@ -230,14 +230,30 @@ the container omap. Gated on `APFS_P5_FIXTURE` (+ `APFS_P5_PART_OFFSET`,
 `APFS_P5_FILE`, `APFS_P5_V1_SHA256`, `APFS_P5_V2_SHA256`); **skips cleanly** when
 absent. See `tests/data/README.md` for the mint recipe and recorded values.
 
-> **Performance (keyed omap descent).** `omap.resolve` is a **keyed point
-> descent** (`btree::find_leaf`): it reads one root→leaf path instead of scanning
-> the whole omap B-tree on every node-resolution. This cut the real-fixture
-> validation run from **~4962 s (~83 min) to ~5 s** — same byte-identical result.
-> The residual cost is the full fs-tree walk per path component
-> (`for_each_fs_record`); a keyed fs-tree lookup in `dir.rs` is the next
-> optimization if sub-second reads are wanted, but reads are now practical on
-> real volumes.
+> **Performance (keyed descent, two layers).** Navigation was quadratic on real
+> volumes; two keyed-descent changes fixed it, each measured on the real P5
+> fixture:
+>
+> 1. **omap** (`btree::find_leaf`): `omap.resolve` reads one root→leaf path
+>    instead of scanning the whole omap B-tree on every node resolution. Cut the
+>    point-in-time validation run from **~4962 s (~83 min) to ~5 s**.
+> 2. **fs-tree** (`dir::for_each_fs_record_for_oid`): the fs-tree walk now prunes
+>    to the target object id — at each index node it descends only children whose
+>    key range can cover that oid (`child_may_contain_oid`), instead of visiting
+>    every node and filtering. Every navigation entry point (`lookup_child`,
+>    `load_inode`, `list_dir`, `list_extents`, `list_xattrs`) keys by one object
+>    id, so all benefit.
+>
+> **Measured (env-gated `keyed_nav.rs::keyed_navigation_prunes_real_fs_tree`, real
+> macOS multi-level fs-tree):** resolving + reading `/Users/admin/changing.txt`
+> touched **25 955 distinct blocks before → 26 after** the fs-tree pruning, same
+> byte-identical bytes (the macOS `APFS_P5_V2_SHA256` oracle). With both layers
+> the point-in-time test runs in **~0.01 s** (from ~83 min). The committed
+> fixtures are single-leaf, so the index-pruning branch is validated on the real
+> multi-level tree (above) plus a CI-visible cross-check that the keyed walk
+> returns the same record set as the full unpruned walk on `apfs_fstree.bin`
+> (`dir::tests::keyed_walk_matches_full_walk_on_real_fs_tree`) and a boundary-case
+> unit test of the prune predicate (`child_pruning_selects_only_covering_subtrees`).
 
 > **Minting blocker (host capability, documented).** Creating an APFS snapshot on
 > an arbitrary (DMG) volume requires the `com.apple.developer.vfs.snapshot`
