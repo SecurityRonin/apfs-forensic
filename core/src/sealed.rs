@@ -29,10 +29,45 @@ pub struct IntegrityMeta {
     pub broken_xid: u64,
 }
 
+// `integrity_meta_phys_t` field offsets (after the 32-byte obj_phys header).
+const OFF_IM_VERSION: usize = 32; // u32
+const OFF_IM_FLAGS: usize = 36; // u32
+const OFF_IM_HASH_TYPE: usize = 40; // u32 (apfs_hash_type_t)
+const OFF_IM_BROKEN_XID: usize = 48; // xid_t (u64)
+const INTEGRITY_META_MIN_LEN: usize = OFF_IM_BROKEN_XID + 8;
+
 impl IntegrityMeta {
-    /// Parse an `integrity_meta_phys_t`.
-    pub fn parse(_block: &[u8]) -> crate::Result<Self> {
-        todo!("P8: decode integrity_meta_phys_t (parse only)")
+    /// Parse an `integrity_meta_phys_t` (parse only — no hash recomputation,
+    /// which is a forensic judgment in `apfs-forensic::sealed`).
+    ///
+    /// # Errors
+    /// [`crate::ApfsError::ChecksumMismatch`] on a Fletcher-64 failure (checksum-
+    /// before-trust); [`crate::ApfsError::FieldOutOfRange`] if the block is too
+    /// short to hold the structure.
+    pub fn parse(block: &[u8]) -> crate::Result<Self> {
+        if block.len() < INTEGRITY_META_MIN_LEN {
+            return Err(crate::ApfsError::FieldOutOfRange {
+                structure: "integrity_meta_phys",
+                field: "block.len",
+                value: block.len() as u64,
+                cap: INTEGRITY_META_MIN_LEN as u64,
+            });
+        }
+        let stored = crate::object::fletcher64_stored(block);
+        let computed = crate::object::fletcher64_checksum(block);
+        if stored != computed {
+            return Err(crate::ApfsError::ChecksumMismatch {
+                block: crate::bytes::le_u64(block, 8),
+                stored,
+                computed,
+            });
+        }
+        Ok(Self {
+            version: crate::bytes::le_u32(block, OFF_IM_VERSION),
+            flags: crate::bytes::le_u32(block, OFF_IM_FLAGS),
+            hash_type: crate::bytes::le_u32(block, OFF_IM_HASH_TYPE),
+            broken_xid: crate::bytes::le_u64(block, OFF_IM_BROKEN_XID),
+        })
     }
 }
 
@@ -41,8 +76,8 @@ mod tests {
     use super::*;
 
     /// Build a checksum-valid `integrity_meta_phys_t` block: fields after the
-    /// 32-byte obj_phys header — im_version@32, im_flags@36, im_hash_type@40,
-    /// im_root_hash_offset@44, im_broken_xid@48 (u64).
+    /// 32-byte `obj_phys` header — `im_version`@32, `im_flags`@36, `im_hash_type`@40,
+    /// `im_root_hash_offset`@44, `im_broken_xid`@48 (u64).
     fn integrity_block(version: u32, flags: u32, hash_type: u32, broken_xid: u64) -> Vec<u8> {
         let mut b = vec![0u8; 4096];
         b[32..36].copy_from_slice(&version.to_le_bytes());
