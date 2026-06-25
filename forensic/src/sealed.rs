@@ -32,8 +32,12 @@ pub fn audit<R: std::io::Read + std::io::Seek>(
 /// `IntegrityMeta`). A non-zero `im_broken_xid` records that the seal was broken
 /// at a known transaction — reported as an observation, not a "system volume was
 /// modified" verdict (that trust-chain conclusion is for the examiner).
-fn sealed_anomalies(_broken_xid: u64) -> Vec<AnomalyKind> {
-    Vec::new() // RED stub
+fn sealed_anomalies(broken_xid: u64) -> Vec<AnomalyKind> {
+    if broken_xid != 0 {
+        vec![AnomalyKind::SealedVolumeBroken { broken_xid }]
+    } else {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
