@@ -141,6 +141,9 @@ pub struct ApfsContainer<R: Read + Seek> {
     superblock: container::NxSuperblock,
     /// Block address of the live superblock within the checkpoint descriptor area.
     live_superblock_paddr: u64,
+    /// Ephemeral oid → paddr mappings from the live checkpoint map (resolve the
+    /// spaceman, reaper, and reap-list ephemeral objects).
+    checkpoint_mappings: Vec<checkpoint::CheckpointMapping>,
 }
 
 impl<R: Read + Seek> ApfsContainer<R> {
@@ -199,7 +202,39 @@ impl<R: Read + Seek> ApfsContainer<R> {
             reader,
             superblock,
             live_superblock_paddr: live.superblock_paddr,
+            checkpoint_mappings: live.mappings,
         })
+    }
+
+    /// The live checkpoint-map mappings (ephemeral oid → paddr). Pass these to
+    /// [`reaper::pending_objects`] to walk the reaper's ephemeral reap lists.
+    #[must_use]
+    pub fn checkpoint_mappings(&self) -> &[checkpoint::CheckpointMapping] {
+        &self.checkpoint_mappings
+    }
+
+    /// Physical block of the live space manager (`nx_spaceman_oid` resolved
+    /// through the checkpoint map), or `None` if it is not mapped. Feed it to
+    /// [`spaceman::is_block_free`].
+    #[must_use]
+    pub fn spaceman_paddr(&self) -> Option<u64> {
+        self.resolve_ephemeral(self.superblock.spaceman_oid)
+    }
+
+    /// Physical block of the live reaper (`nx_reaper_oid` resolved through the
+    /// checkpoint map), or `None` if it is not mapped. Feed it to
+    /// [`reaper::pending_objects`].
+    #[must_use]
+    pub fn reaper_paddr(&self) -> Option<u64> {
+        self.resolve_ephemeral(self.superblock.reaper_oid)
+    }
+
+    /// Resolve an ephemeral oid to its physical block via the checkpoint map.
+    fn resolve_ephemeral(&self, oid: u64) -> Option<u64> {
+        self.checkpoint_mappings
+            .iter()
+            .find(|m| m.oid == oid)
+            .map(|m| m.paddr)
     }
 
     /// The live container superblock resolved from the checkpoint ring.

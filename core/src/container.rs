@@ -42,6 +42,8 @@ const OFF_BLOCK_SIZE: usize = 36; // nx_block_size  u32
 const OFF_BLOCK_COUNT: usize = 40; // nx_block_count u64
 const OFF_INCOMPAT_FEATURES: usize = 64; // nx_incompatible_features u64
 const OFF_UUID: usize = 72; // nx_uuid            uuid_t (16)
+const OFF_SPACEMAN_OID: usize = 152; // nx_spaceman_oid oid (u64, ephemeral)
+const OFF_REAPER_OID: usize = 168; // nx_reaper_oid    oid (u64, ephemeral)
 const OFF_XP_DESC_BLOCKS: usize = 104; // nx_xp_desc_blocks u32
 const OFF_XP_DATA_BLOCKS: usize = 108; // nx_xp_data_blocks u32
 const OFF_XP_DESC_BASE: usize = 112; // nx_xp_desc_base paddr (u64)
@@ -78,6 +80,12 @@ pub struct NxSuperblock {
     pub xp_data_blocks: u32,
     /// Container object-map oid (`nx_omap_oid`).
     pub omap_oid: u64,
+    /// Space-manager ephemeral oid (`nx_spaceman_oid`) — resolve to a paddr via
+    /// the checkpoint map.
+    pub spaceman_oid: u64,
+    /// Reaper ephemeral oid (`nx_reaper_oid`) — resolve to a paddr via the
+    /// checkpoint map.
+    pub reaper_oid: u64,
     /// Volume oids (`nx_fs_oid[]`), one per APSB volume (trailing zeros trimmed).
     pub fs_oids: Vec<u64>,
     /// Whether the descriptor area is a B-tree (high bit of `nx_xp_desc_blocks`).
@@ -139,6 +147,8 @@ impl NxSuperblock {
         let data_is_tree = data_blocks_raw & XP_BLOCKS_TREE_FLAG != 0;
 
         let omap_oid = crate::bytes::le_u64(block, OFF_OMAP_OID);
+        let spaceman_oid = crate::bytes::le_u64(block, OFF_SPACEMAN_OID);
+        let reaper_oid = crate::bytes::le_u64(block, OFF_REAPER_OID);
 
         // Cap nx_max_file_systems before reading the fs_oid array (Apple bounds
         // it at NX_MAX_FILE_SYSTEMS; a larger value is corruption — clamp to the
@@ -163,6 +173,8 @@ impl NxSuperblock {
             xp_data_base: crate::bytes::le_u64(block, OFF_XP_DATA_BASE),
             xp_data_blocks: data_blocks_raw & !XP_BLOCKS_TREE_FLAG,
             omap_oid,
+            spaceman_oid,
+            reaper_oid,
             fs_oids,
             desc_is_tree,
             data_is_tree,
