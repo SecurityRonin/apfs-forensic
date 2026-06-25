@@ -292,3 +292,37 @@ absent. See `tests/data/README.md` for the mint recipe and recorded values.
 on a self-minted corpus ⇒ Tier 2 for the location/empty/seam claims; the populated
 v1-vs-v2 path lifts to Tier 2 with an independent oracle (`diskutil apfs
 listSnapshots` + macOS-written SHA-256) once the env-gated fixture is supplied.
+
+### Space manager (allocation bitmap) + reaper (P6) — Tier 2
+
+**What P6 reads.** The space manager (`spaceman_phys_t`, ephemeral
+`nx_spaceman_oid`, resolved via the checkpoint map) answers *"is this physical
+block free?"*: block → chunk → chunk-info (CIB) → `SPACEMAN_BITMAP`. The reaper
+(`nx_reaper_phys_t`, ephemeral `nx_reaper_oid`) surfaces objects **logically
+deleted but still physically present** (`pending_objects`).
+
+**Bit polarity (the inverted-bit trap).** A set bit = **allocated**, clear =
+**free** (apfsck `count_chunk_free`: `free = total − popcount(bitmap)`);
+`ci_bitmap_addr == 0` ⇒ whole chunk free. Offsets/polarity were taken **before
+coding** from linux-apfs `apfs_raw.h` + apfsprogs `spaceman.c`, cross-checked
+against libfsapfs (which leaves the chunk fields *Unknown* — so polarity rests on
+apfsprogs' runtime-self-validated code, flagged below).
+
+**What is exercised** (`core/tests/{spaceman,reaper,container_open}.rs` + `reaper.rs` units):
+
+| Claim | Evidence | Oracle / tier |
+|---|---|---|
+| `is_block_free` correct on real data | on `apfs_container_chain.bin` every block 0..=344 (live objects: NXSB@0, spaceman@11, reaper@12, CIB@331, bitmap@332, omap@343, APSB@342) reports **allocated**; every block ≥ 345 reports **free** | the carve boundary (Tier 2) |
+| bit polarity verified by an **independent** count | counting allocations via `is_block_free` over all 32 758 blocks yields **345 == block_count − free_count**, the spaceman's own accounting (independent of how each bit is read — a flipped polarity changes this total) | spaceman `free_count` (**Tier 2**) |
+| CAB tier fails loud | `sm_cab_count > 0` (multi-TB indirection, not yet implemented) returns `UnsupportedSpacemanCab`, never a mis-resolved chunk | construction |
+| reaper empty on a clean container | the fixture's live reaper (block 12) has `nr_head == 0`, `nr_oid == 0` ⇒ `pending_objects` returns no entries | real fixture (**Tier 2**) |
+| reaper walk + in-progress object | synthetic `nx_reaper_phys_t` → `nx_reap_list_phys_t` (two entries, chained via a checkpoint mapping) yields both `(oid, type)`; an in-progress `nr_oid` is reported with no lists | spec-faithful hand-built blocks (**Tier 3**; the offsets they use are Tier-2-validated above) |
+| ephemeral resolution | `ApfsContainer::spaceman_paddr()`/`reaper_paddr()` resolve `nx_spaceman_oid`/`nx_reaper_oid` to blocks 11/12 via the live checkpoint map | real fixture (**Tier 2**) |
+
+**Flag (honest tiering).** The 1=allocated polarity is confirmed by one decoder
+family (apfsprogs/linux-apfs) whose code self-checks against `ci_free_count` on
+every real image, not by two independently-reasoned decoders — libfsapfs does not
+decode these fields. The independent free-count cross-check above (345 from the
+bitmap == 345 from the spaceman accounting) is what raises this to Tier 2 on our
+real fixture. The populated reap-list walk is Tier 3 (no committed fixture has a
+queued reaper; a real deleted-volume image would lift it).
