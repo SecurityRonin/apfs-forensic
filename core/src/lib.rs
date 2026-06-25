@@ -95,6 +95,11 @@ pub enum ApfsError {
     /// yet supported — fail loud rather than mis-read physical addresses.
     #[error("unsupported Fusion container (tier-2 device present); Fusion addressing not yet implemented")]
     UnsupportedFusion,
+    /// The space manager uses chunk-info **address** blocks (`sm_cab_count > 0`),
+    /// the multi-TB CAB indirection tier, which is not yet implemented — fail
+    /// loud rather than mis-resolve an allocation chunk. Carries the count.
+    #[error("unsupported space-manager CAB tier (sm_cab_count = {count}); only inline CIB layout is implemented")]
+    UnsupportedSpacemanCab { count: u64 },
     /// A length/offset/count field from the image exceeded a sanity cap
     /// (allocation-bomb / corruption defense). Carries the offending value.
     #[error("structural field out of range in {structure}: {field} = {value} (cap {cap})")]
