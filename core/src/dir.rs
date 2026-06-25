@@ -95,19 +95,45 @@ fn parse_dir_entry(key: &[u8], value: &[u8]) -> Option<DirEntry> {
     })
 }
 
-/// Walk the volume fs-tree (a *virtual* B-tree resolved through the volume omap),
-/// invoking `visit(key, value)` for every leaf record. Each node's virtual oid is
-/// resolved to a physical block via the omap at the volume's xid, the node's
-/// Fletcher-64 checksum is verified before its TOC is trusted, the descent depth
-/// is capped, and a visited-set guards against cyclic node oids.
+/// Walk the volume fs-tree (a *virtual* B-tree resolved through the volume omap)
+/// keyed to a single object id: visit only the records whose `j_key` object id is
+/// `target_oid`, descending one root→leaf path per node level instead of the
+/// whole tree. The fs-tree is sorted by object id first, so all records for one
+/// object id occupy a contiguous key range; at each index node only the children
+/// whose key range can cover `target_oid` are descended (see
+/// [`child_may_contain_oid`]). Each node's Fletcher-64 checksum is verified
+/// before its TOC is trusted, the descent depth is capped, and a visited-set
+/// guards against cyclic node oids. The `visit` callback still sees the landing
+/// leaves' entries and must filter precisely (a leaf may also hold neighbours).
 ///
-/// `pub(crate)` so the extent/xattr readers ([`crate::extent`], [`crate::xattr`])
-/// scan the same fs-tree for `FILE_EXTENT`/`XATTR` records without duplicating the
-/// omap-resolution + checksum/cycle-guard walk.
-pub(crate) fn for_each_fs_record<R, F>(
+/// `pub(crate)` so every navigation entry point shares it — `lookup_child`,
+/// `load_inode`, `list_dir`, [`crate::extent::list_extents`],
+/// [`crate::xattr::list_xattrs`] — since each filters by a single object id,
+/// without duplicating the omap-resolution + checksum/cycle-guard walk.
+///
+/// # Errors
+/// [`crate::ApfsError::OmapUnresolved`] / [`crate::ApfsError::ChecksumMismatch`]
+/// / [`crate::ApfsError::CycleGuard`] / [`crate::ApfsError::Io`] on a
+/// structurally invalid omap/fs-tree or a read failure.
+pub(crate) fn for_each_fs_record_for_oid<R, F>(
     reader: &mut R,
     volume: &ApfsVolume,
     block_size: usize,
+    target_oid: u64,
+    visit: &mut F,
+) -> crate::Result<()>
+where
+    R: Read + Seek,
+    F: FnMut(&[u8], &[u8]),
+{
+    walk_fs_tree(reader, volume, block_size, Some(target_oid), visit)
+}
+
+fn walk_fs_tree<R, F>(
+    reader: &mut R,
+    volume: &ApfsVolume,
+    block_size: usize,
+    target_oid: Option<u64>,
     visit: &mut F,
 ) -> crate::Result<()>
 where
@@ -130,9 +156,23 @@ where
         xid,
         block_size,
         0,
+        target_oid,
         &mut visited,
         visit,
     )
+}
+
+/// Whether an index-node child whose subtree covers keys `[sep, next_sep)` can
+/// contain a record with object id `target`. `next_sep` is the next separator's
+/// object id, or `None` for the last child (its subtree extends upward without
+/// bound). Records for one object id form a contiguous key range, so the child
+/// is relevant iff its low bound is ≤ `target` and its high bound is ≥ `target`.
+///
+/// The `next_sep == target` boundary **must** descend: a separator is the first
+/// *full* key of the next child, so a record `(target, low_type)` smaller than
+/// that separator can still live at the end of *this* child.
+fn child_may_contain_oid(sep_oid: u64, next_sep_oid: Option<u64>, target: u64) -> bool {
+    sep_oid <= target && next_sep_oid.is_none_or(|next| next >= target)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -143,6 +183,7 @@ fn descend_virtual<R, F>(
     xid: u64,
     block_size: usize,
     depth: usize,
+    target_oid: Option<u64>,
     visited: &mut std::collections::HashSet<u64>,
     visit: &mut F,
 ) -> crate::Result<()>
@@ -194,12 +235,21 @@ where
         return Ok(());
     }
 
-    // Index node: each value is an 8-byte child *virtual* oid; descend each.
-    let children: Vec<u64> = btree::node_entries(&buf, BTreeSubtype::FsTree)
-        .iter()
-        .map(|e| crate::bytes::le_u64(e.value, 0))
-        .collect();
-    for child in children {
+    // Index node: each value is an 8-byte child *virtual* oid. For a keyed walk,
+    // descend only the children whose key range can cover `target_oid`; a full
+    // walk (target_oid == None) descends every child.
+    let entries = btree::node_entries(&buf, BTreeSubtype::FsTree);
+    for i in 0..entries.len() {
+        if let Some(target) = target_oid {
+            let (sep_oid, _) = decode_jkey(crate::bytes::le_u64(entries[i].key, 0));
+            let next_sep_oid = entries
+                .get(i + 1)
+                .map(|e| decode_jkey(crate::bytes::le_u64(e.key, 0)).0);
+            if !child_may_contain_oid(sep_oid, next_sep_oid, target) {
+                continue;
+            }
+        }
+        let child = crate::bytes::le_u64(entries[i].value, 0);
         descend_virtual(
             reader,
             omap,
@@ -207,6 +257,7 @@ where
             xid,
             block_size,
             depth + 1,
+            target_oid,
             visited,
             visit,
         )?;
@@ -228,7 +279,7 @@ pub fn list_dir<R: Read + Seek>(
     block_size: usize,
 ) -> crate::Result<Vec<DirEntry>> {
     let mut out = Vec::new();
-    for_each_fs_record(reader, volume, block_size, &mut |key, value| {
+    for_each_fs_record_for_oid(reader, volume, block_size, parent_oid, &mut |key, value| {
         let (oid, ty) = decode_jkey(crate::bytes::le_u64(key, 0));
         if ty != Some(RecordType::DirRec) || oid != parent_oid {
             return;
@@ -255,7 +306,7 @@ pub fn lookup_child<R: Read + Seek>(
     block_size: usize,
 ) -> crate::Result<Option<u64>> {
     let mut found = None;
-    for_each_fs_record(reader, volume, block_size, &mut |key, value| {
+    for_each_fs_record_for_oid(reader, volume, block_size, parent_oid, &mut |key, value| {
         if found.is_some() {
             return;
         }
@@ -288,7 +339,7 @@ pub fn load_inode<R: Read + Seek>(
     block_size: usize,
 ) -> crate::Result<Inode> {
     let mut value: Option<Vec<u8>> = None;
-    for_each_fs_record(reader, volume, block_size, &mut |key, val| {
+    for_each_fs_record_for_oid(reader, volume, block_size, oid, &mut |key, val| {
         if value.is_some() {
             return;
         }
@@ -358,6 +409,99 @@ mod tests {
         key.extend_from_slice(&5u32.to_le_bytes()); // len=5 in low 10 bits, hash 0
         key.extend_from_slice(b"abcd\0");
         assert_eq!(decode_drec_name(&key).as_deref(), Some("abcd"));
+    }
+
+    #[test]
+    fn child_pruning_selects_only_covering_subtrees() {
+        // Index node with separators [oid 0, oid 10, oid 20]; child i covers
+        // [sep_i, sep_{i+1}). Records for one oid form a contiguous key range.
+        // target oid 15 lives only under child[1] (covers [10, 20)).
+        assert!(
+            !child_may_contain_oid(0, Some(10), 15),
+            "child [0,10) excludes 15"
+        );
+        assert!(
+            child_may_contain_oid(10, Some(20), 15),
+            "child [10,20) covers 15"
+        );
+        assert!(
+            !child_may_contain_oid(20, None, 15),
+            "child [20,inf) excludes 15"
+        );
+
+        // Boundary spill: a separator is the next child's FIRST FULL key, so a
+        // record (target, low_type) below it can sit at the END of THIS child.
+        // Hence next_sep == target MUST still descend.
+        assert!(
+            child_may_contain_oid(5, Some(10), 10),
+            "next_sep == target must descend (record may trail in this child)"
+        );
+        // sep == target obviously descends; last child always covers the high side.
+        assert!(child_may_contain_oid(10, Some(20), 10));
+        assert!(child_may_contain_oid(5, None, 999));
+        // Entirely below the target prunes.
+        assert!(!child_may_contain_oid(0, Some(5), 10));
+    }
+
+    // Real-data cross-check: on the Apple-authored fs-tree, the KEYED walk must
+    // visit exactly the records the FULL (unpruned) walk visits when filtered to
+    // the same object id. The full walk — the same descent with no pruning, whose
+    // results are independently validated against `fls`/`istat` by the dir/inode
+    // integration tests — is the oracle, so this proves the keyed pruning never
+    // drops a covering record.
+    const FSTREE: &[u8] = include_bytes!("../../tests/data/apfs_fstree.bin");
+    const FSTREE_BLOCK_SIZE: usize = 4096;
+    const FSTREE_APSB_BLOCK: usize = 371;
+
+    fn fstree_volume() -> ApfsVolume {
+        let b = &FSTREE
+            [FSTREE_APSB_BLOCK * FSTREE_BLOCK_SIZE..(FSTREE_APSB_BLOCK + 1) * FSTREE_BLOCK_SIZE];
+        ApfsVolume::parse(b).expect("parse APSB")
+    }
+
+    fn keys_for_oid_full(oid: u64) -> Vec<Vec<u8>> {
+        use std::io::Cursor;
+        let mut r = Cursor::new(FSTREE);
+        let vol = fstree_volume();
+        let mut out = Vec::new();
+        // walk_fs_tree(None) is the full, unpruned descent — the oracle.
+        walk_fs_tree(&mut r, &vol, FSTREE_BLOCK_SIZE, None, &mut |k, _| {
+            if decode_jkey(crate::bytes::le_u64(k, 0)).0 == oid {
+                out.push(k.to_vec());
+            }
+        })
+        .expect("full walk");
+        out
+    }
+
+    fn keys_for_oid_keyed(oid: u64) -> Vec<Vec<u8>> {
+        use std::io::Cursor;
+        let mut r = Cursor::new(FSTREE);
+        let vol = fstree_volume();
+        let mut out = Vec::new();
+        for_each_fs_record_for_oid(&mut r, &vol, FSTREE_BLOCK_SIZE, oid, &mut |k, _| {
+            if decode_jkey(crate::bytes::le_u64(k, 0)).0 == oid {
+                out.push(k.to_vec());
+            }
+        })
+        .expect("keyed walk");
+        out
+    }
+
+    #[test]
+    fn keyed_walk_matches_full_walk_on_real_fs_tree() {
+        // Root dir (2), Dir1 (18), and a file inode (22) — each must yield the
+        // same record set keyed as it does via the filtered full walk.
+        for oid in [2u64, 18, 22] {
+            assert_eq!(
+                keys_for_oid_keyed(oid),
+                keys_for_oid_full(oid),
+                "keyed vs full record set for oid {oid}"
+            );
+        }
+        // A non-existent oid yields nothing either way.
+        assert!(keys_for_oid_keyed(999_999).is_empty());
+        assert_eq!(keys_for_oid_keyed(999_999), keys_for_oid_full(999_999));
     }
 
     #[test]

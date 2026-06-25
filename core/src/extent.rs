@@ -18,7 +18,7 @@
 
 use std::io::{Read, Seek};
 
-use crate::dir::for_each_fs_record;
+use crate::dir::for_each_fs_record_for_oid;
 use crate::fsrecord::{decode_jkey, RecordType};
 use crate::inode::Inode;
 use crate::volume::ApfsVolume;
@@ -67,7 +67,7 @@ pub fn list_extents<R: Read + Seek>(
     block_size: usize,
 ) -> crate::Result<Vec<FileExtent>> {
     let mut out = Vec::new();
-    for_each_fs_record(reader, volume, block_size, &mut |key, value| {
+    for_each_fs_record_for_oid(reader, volume, block_size, stream_oid, &mut |key, value| {
         let (oid, ty) = decode_jkey(crate::bytes::le_u64(key, 0));
         if ty != Some(RecordType::FileExtent) || oid != stream_oid {
             return;
