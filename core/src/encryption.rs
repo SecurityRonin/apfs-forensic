@@ -51,6 +51,10 @@ pub struct EncryptionState {
     pub encrypted: bool,
     pub tags_present: Vec<KeybagTag>,
     pub has_passphrase_hint: bool,
+    /// Raw `(ke_tag, entry offset)` pairs for keybag entries whose tag is not a
+    /// recognised `KB_TAG_*` value — surfaced so an audit can report the
+    /// offending value + location (show-the-value rule), not just "unknown".
+    pub unknown_tags: Vec<(u16, u64)>,
 }
 
 // `kb_locker` header field offsets, then 16-byte-aligned `keybag_entry_t`s.
@@ -73,14 +77,19 @@ const MAX_KEYBAG_ENTRIES: usize = 4096;
 pub fn read_keybag(data: &[u8]) -> crate::Result<EncryptionState> {
     let nkeys = (crate::bytes::le_u16(data, KL_NKEYS) as usize).min(MAX_KEYBAG_ENTRIES);
     let mut tags_present = Vec::new();
+    let mut unknown_tags = Vec::new();
     let mut off = KL_ENTRIES_OFF;
     for _ in 0..nkeys {
         // Stop if the entry header would run past the blob (never over-read).
         if off + KE_HEADER_LEN > data.len() {
             break;
         }
-        let tag = KeybagTag::from_u16(crate::bytes::le_u16(data, off + KE_TAG));
+        let raw_tag = crate::bytes::le_u16(data, off + KE_TAG);
+        let tag = KeybagTag::from_u16(raw_tag);
         let keylen = crate::bytes::le_u16(data, off + KE_KEYLEN) as usize;
+        if tag == KeybagTag::Unknown {
+            unknown_tags.push((raw_tag, off as u64));
+        }
         if !tags_present.contains(&tag) {
             tags_present.push(tag);
         }
@@ -101,6 +110,7 @@ pub fn read_keybag(data: &[u8]) -> crate::Result<EncryptionState> {
         encrypted,
         tags_present,
         has_passphrase_hint,
+        unknown_tags,
     })
 }
 
@@ -150,10 +160,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tag_maps_to_unknown_not_panic() {
-        // A reserved/unexpected tag must decode as Unknown, never panic.
+    fn unknown_tag_maps_to_unknown_and_records_raw_value() {
+        // A reserved/unexpected tag must decode as Unknown (never panic) and its
+        // raw value + offset must be retained for the show-the-value rule.
         let kb = keybag(&[(0x55, 4)]);
         let st = read_keybag(&kb).expect("parse keybag");
         assert!(st.tags_present.contains(&KeybagTag::Unknown));
+        assert_eq!(st.unknown_tags, vec![(0x55u16, 16u64)]);
     }
 }
