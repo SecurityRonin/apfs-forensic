@@ -9,6 +9,7 @@ use apfs_core::object::fletcher64_checksum;
 use apfs_core::{ApfsContainer, ApfsError};
 
 const HEAD: &[u8] = include_bytes!("../../tests/data/apfs_nxsb_head.bin");
+const CHAIN: &[u8] = include_bytes!("../../tests/data/apfs_container_chain.bin");
 
 /// `NX_INCOMPAT_FUSION` (Apple *APFS Reference*, `nx_incompatible_features`).
 const NX_INCOMPAT_FUSION: u64 = 0x100;
@@ -68,6 +69,20 @@ fn open_fails_loud_on_fusion_container() {
 fn open_does_not_flag_real_non_fusion_container() {
     // Regression: the unmodified real container has no Fusion bit and must open.
     assert!(ApfsContainer::open(Cursor::new(HEAD)).is_ok());
+}
+
+#[test]
+fn resolves_ephemeral_spaceman_and_reaper_paddrs() {
+    // The live NXSB names the spaceman/reaper by ephemeral oid (1024/1025); the
+    // checkpoint map resolves them to physical blocks 11/12 in this fixture.
+    let container = ApfsContainer::open(Cursor::new(CHAIN)).expect("open container");
+    assert_eq!(container.spaceman_paddr(), Some(11));
+    assert_eq!(container.reaper_paddr(), Some(12));
+    // The checkpoint mappings (needed to walk the reaper's ephemeral reap lists)
+    // are exposed and include both ephemeral objects.
+    let maps = container.checkpoint_mappings();
+    assert!(maps.iter().any(|m| m.paddr == 11));
+    assert!(maps.iter().any(|m| m.paddr == 12));
 }
 
 #[test]
