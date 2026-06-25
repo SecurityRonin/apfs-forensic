@@ -189,9 +189,11 @@ libfsapfs names it `snapshot_metadata_tree_block_number`, `o_subtype` 0x10
 the `j_key` top-4-bit type: **metadata** (`SNAP_METADATA 1`, keyed by the
 snapshot **xid**, value `j_snap_metadata_val_t`) and **name** (`SNAP_NAME 11`,
 keyed by name, value `j_snap_name_val_t { snap_xid }`). `mount_snapshot` reads a
-snapshot's `sblock_oid` (a physical APSB block) as an `ApfsVolume`, so the
-existing P3/P4 navigation reads the volume as it stood at snapshot time (the
-volume omap resolves fs-tree oids picking `ok_xid ≤ snapshot_xid`).
+snapshot's `sblock_oid` (a physical APSB block) and **grafts the live volume's
+object map** onto the frozen superblock: a snapshot's own `apfs_omap_oid` is `0`,
+so its fs-tree is read through the live omap, resolving oids at the snapshot's
+xid (`ok_xid ≤ snapshot_xid`). The existing P3/P4 navigation then reads the
+volume exactly as it stood at snapshot time.
 
 **Constant verification (before coding).** The `j_snap_metadata_val_t` field
 offsets were taken **verbatim** from libfsapfs `fsapfs_snapshot_metadata_btree_value`
@@ -209,16 +211,32 @@ implements and what the unit test now asserts.
 | **snap-meta tree located + walked on real Apple bytes** | the P4 fixture's APSB (block 438) carries `apfs_snap_meta_tree_oid` = block 340, a real `o_subtype 0x10` btree node whose `btn_nkeys` is 0; the walk reads it, **verifies its Fletcher-64 checksum**, and returns zero snapshots | the documented empty tree + Apple-authored checksum (**Tier 2**, real structure) |
 | **`j_snap_metadata_val_t` decode** | every field decoded at the verified offsets | libfsapfs + dissect.apfs agreement (constant verification) |
 | **`j_snap_name_key_t` decode + name→xid resolve** | `resolve_snapshot_xid` returns `None` on the empty real tree; returns the right xid on a populated vector | construction + the libfsapfs `snap_xid` value layout |
-| **point-in-time seam** | `mount_snapshot(sblock_oid = block 438)` yields an `ApfsVolume` **byte-identical** (same oid/xid/omap/root-tree/name `APFSP4`) to a direct `ApfsVolume::parse` of block 438; mounting a non-APSB block (NXSB @0) **fails loudly** with `UnexpectedObjectType` | real P4 APSB (**Tier 2**) |
+| **point-in-time seam** | `mount_snapshot` reads `sblock_oid` as an `ApfsVolume` and grafts the live omap (a snapshot's own `apfs_omap_oid` is `0`); the frozen `root_tree_oid`/`xid` are preserved. A unit test pins the graft (`omap_oid` overridden to the live volume's); mounting a non-APSB block (NXSB @0) **fails loudly** with `UnexpectedObjectType` | real P4 APSB + `omap_oid==0` contract (**Tier 2**) |
 | **walk control flow** (leaf dispatch, index-node **virtual** child descent through the volume omap, checksum-mismatch fail-loud, visited-set cycle guard) | spec-faithful hand-built APFS micro-images: real `obj_phys` headers, real Fletcher-64, real variable-KV TOC/key/value + fixed-KV omap layout | **Tier 3** (walk control flow only; every offset/decode it relies on is Tier-2-validated on real data above) |
 
-**Populated changing-file path (env-gated, ready).** The full
-`diskutil apfs listSnapshots` reconciliation and the **v1-vs-v2 point-in-time
-read** (read `changing.txt` at snapshot 1 → v1 SHA-256; at the live volume → v2
-SHA-256; assert each matches what macOS wrote) run from
-`core/tests/snapshot.rs::populated_fixture_point_in_time_read`, gated on
-`APFS_P5_FIXTURE` (+ `APFS_P5_LIVE_APSB` / `APFS_P5_V1_SHA256` / `APFS_P5_V2_SHA256`).
-It **skips cleanly** when the fixture is absent.
+**Populated changing-file path (env-gated) — VALIDATED on real snapshots.** The
+**v1-vs-v2 point-in-time read** (read `changing.txt` at the earliest snapshot →
+v1 SHA-256; at the live volume → v2 SHA-256; assert each matches what macOS
+wrote, and that they differ) ran from
+`core/tests/snapshot.rs::populated_fixture_point_in_time_read` against a real
+Apple-minted fixture and **passed** — byte-identical to the macOS oracle
+(v1 `da27342b…`, v2 `cfd0476c…`; snapshot XIDs 6094/6096). This is the strongest
+P5 evidence: an independent oracle (macOS itself) on real snapshots, and it
+caught a real bug the synthetic seam test missed — the committed `mount_snapshot`
+did not graft the live omap, so point-in-time `open_path` read block 0 (the NXSB)
+and failed. The fixture is a whole GPT disk image (a Tart VM `disk.img`); the
+test opens it through a partition-offset view and **derives** the live APSB from
+the container omap. Gated on `APFS_P5_FIXTURE` (+ `APFS_P5_PART_OFFSET`,
+`APFS_P5_FILE`, `APFS_P5_V1_SHA256`, `APFS_P5_V2_SHA256`); **skips cleanly** when
+absent. See `tests/data/README.md` for the mint recipe and recorded values.
+
+> **Performance caveat (pre-existing, P1–P4, not P5).** Navigation is currently
+> quadratic — `omap.resolve` full-scans the omap B-tree and is called per node by
+> a full fs-tree walk (`for_each_fs_record`), per path component. On the tiny
+> committed fixtures this is instant, but one `open_path` on the real ~50 GB
+> Data volume took **~83 min** (the validation run above). Correctness is
+> oracle-confirmed; the slowness is a separate keyed-B-tree-descent optimization
+> (`omap.rs` + `dir.rs`), tracked independently.
 
 > **Minting blocker (host capability, documented).** Creating an APFS snapshot on
 > an arbitrary (DMG) volume requires the `com.apple.developer.vfs.snapshot`

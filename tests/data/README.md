@@ -237,46 +237,50 @@ hdiutil create -size 64m -encryption -stdinpass -fs APFS -volname APFSENC apfsen
 #### `apfs_p5_snapshots.bin` (env `APFS_P5_FIXTURE`)
 
 - **Class:** SYNTHETIC (self-minted real APFS), Tier 2. **Not committed** — minted
-  on a host where APFS snapshot creation is permitted, then pointed at by
-  `APFS_P5_FIXTURE`.
-- **What it is:** a raw APFS *container partition* image carrying **two snapshots**
-  and a file `changing.txt` whose content **differs between the snapshots**
-  (`VERSION ONE` at snapshot 1 → `VERSION TWO`/live), plus an unchanged
-  `static.txt`. Drives `core/tests/snapshot.rs::populated_fixture_point_in_time_read`:
-  the snapshot list (names/xids/create-times) is reconciled against
-  `diskutil apfs listSnapshots` / `fsapfsinfo`, every snap-name resolves back to
-  its xid, and `changing.txt` reads back **v1 bytes** when navigated at snapshot 1
-  (via `mount_snapshot`) vs **v2 bytes** at the live volume — each byte-identical
-  (SHA-256) to what macOS wrote.
-- **Companion env vars** (recorded with the fixture): `APFS_P5_LIVE_APSB` (the
-  live volume APSB block#), `APFS_P5_V1_SHA256`, `APFS_P5_V2_SHA256`.
-- **Verbatim mint commands:**
+  inside a throwaway macOS VM, then pointed at by `APFS_P5_FIXTURE`. **VALIDATED**
+  (2026-06-25): the populated test passed byte-identical to the macOS oracle.
+- **What it is:** a whole **GPT disk image** (a Tart VM `disk.img`) whose main
+  APFS container holds the System + Data volumes. The Data volume carries **two
+  snapshots** and a file `/Users/admin/changing.txt` whose content **differs
+  between a snapshot and live** (`VERSION ONE` @snapshot → `VERSION TWO` @live),
+  plus an unchanged `static.txt`. Drives
+  `core/tests/snapshot.rs::populated_fixture_point_in_time_read`: enumerates the
+  snapshots, round-trips every snap-name→xid, and reads `changing.txt` at the
+  earliest snapshot (**v1**) via `mount_snapshot` vs the live volume (**v2**) —
+  each byte-identical (SHA-256) to what macOS wrote.
+- **Why a VM (not a DMG).** On a stock SIP-enabled host, APFS snapshot *creation*
+  on a DMG needs the `com.apple.developer.vfs.snapshot` entitlement
+  (`fs_snapshot_create(2)` → `EPERM` even as root; `diskutil apfs` has no
+  `addSnapshot`; `tmutil localsnapshot` only snapshots the FileVault-encrypted
+  system data volume, which the reader can't parse). A fresh macOS VM is
+  unencrypted (FileVault off) and `tmutil localsnapshot` works in-guest with no
+  entitlement — so it mints a reader-parsable snapshot fixture for free.
+- **Recorded values** (this fixture; gitignored, re-mint to refresh):
+  - `APFS_P5_PART_OFFSET=524308480` — byte offset of the **main** APFS container
+    in `disk.img` (part0 @`0x5000` is the small `iBootSystemContainer`; pick the
+    large standard-APFS-GUID partition).
+  - `APFS_P5_FILE=/Users/admin/changing.txt`
+  - `APFS_P5_V1_SHA256=da27342b7ff10001475dd9b6b863998923e6e2318d2b73226e172d0da6c6fc55`
+  - `APFS_P5_V2_SHA256=cfd0476c457d81b8724ec773c3dfeaf6cf55d8c9a74ccceb043411cc0c1c9263`
+  - snapshot XIDs: 6094 (v1) / 6096 (v2). The live APSB block is **derived** by
+    the test from the container omap (no `APFS_P5_LIVE_APSB` needed).
+- **Mint recipe (Tart VM):**
   ```sh
-  hdiutil create -size 128m -fs APFS -volname APFSP5 -layout GPTSPUD /tmp/p5.dmg
-  hdiutil attach /tmp/p5.dmg                         # -> /Volumes/APFSP5 (+ /dev/diskN)
-  printf 'APFS P5 snapshot fixture: VERSION ONE content here.\n' > /Volumes/APFSP5/changing.txt
-  printf 'static file, unchanged across snapshots.\n'          > /Volumes/APFSP5/static.txt
-  sync
-  # snapshot 1 (needs the com.apple.developer.vfs.snapshot entitlement — see note):
-  #   fs_snapshot_create(open("/Volumes/APFSP5"), "APFSP5.snap1", 0)
-  printf 'APFS P5 snapshot fixture: VERSION TWO content here!!\n' > /Volumes/APFSP5/changing.txt
-  sync
-  # snapshot 2:  fs_snapshot_create(..., "APFSP5.snap2", 0)
-  diskutil apfs listSnapshots /dev/diskNs1           # oracle: names + xids
-  sync; hdiutil detach /dev/diskN
-  # carve the minimal block range holding both snapshots' chains + changing.txt's
-  # two extent versions (dd bs=512 skip=40 count=$((<blocks>*8))); commit only that
-  # range IF snapshot creation succeeded (gitignore the .dmg).
+  tart clone ghcr.io/cirruslabs/macos-tahoe-base:latest p5mint   # raw disk, CoW
+  tart run --vnc-experimental --dir=p5share:~/p5share p5mint &    # loopback console + host share
+  # In the VM Terminal (admin/admin), run the mint script (writes the oracle to the share):
+  #   printf 'VERSION ONE\n' > ~/changing.txt; sync; tmutil localsnapshot
+  #   printf 'VERSION TWO\n' > ~/changing.txt; sync; tmutil localsnapshot
+  #   diskutil apfs listSnapshots <dataDev>   # oracle: snapshot names + xids
+  tart stop p5mint
+  # disk.img is now the fixture: ~/.tart/vms/p5mint/disk.img
   ```
-- **SIP minting blocker (host capability).** On a stock SIP-enabled macOS host,
-  APFS snapshot *creation* on a DMG volume is **not possible without an
-  entitlement**: `fs_snapshot_create(2)` returns `EPERM` even as root,
-  `diskutil apfs` has no `addSnapshot` verb, and `tmutil localsnapshot` only
-  snapshots the Time-Machine-eligible system data volume (never the DMG). Mint
-  this fixture on a SIP-relaxed dev box or a TM-registered volume. The P5 *code*
-  (tree location, empty-case, decode, point-in-time seam, walk control flow) is
-  validated **without** this fixture on the committed `apfs_content.bin` + spec-
-  faithful in-memory vectors — see `docs/validation.md` (P5).
+  (`~/p5share/mint.sh` automates the in-VM steps. Host→VM SSH is gated by macOS
+  Local Network Privacy; the loopback VNC + `--dir` share avoids needing it.)
+- **Performance caveat.** One `open_path` on the real ~50 GB Data volume took
+  **~83 min** — navigation is currently quadratic (see `docs/validation.md` P5).
+  The validation passed; the test is slow on real volumes until keyed B-tree
+  descent lands.
 - **Consumed by:** `core/tests/snapshot.rs` (env-gated populated test).
 
 > The committed P5 validations (empty snap-meta tree, `mount_snapshot` seam, walk
