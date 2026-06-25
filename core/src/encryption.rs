@@ -29,6 +29,21 @@ pub enum KeybagTag {
     UserPayload = 0xf8,
 }
 
+impl KeybagTag {
+    /// Map a raw `ke_tag` value to a known tag, or [`KeybagTag::Unknown`].
+    #[must_use]
+    pub fn from_u16(tag: u16) -> Self {
+        match tag {
+            0x01 => Self::WrappingKey,
+            0x02 => Self::VolumeKey,
+            0x03 => Self::VolumeUnlockRecords,
+            0x04 => Self::VolumePassphraseHint,
+            0xf8 => Self::UserPayload,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 /// Observed encryption state of a volume (no secrets).
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -38,9 +53,55 @@ pub struct EncryptionState {
     pub has_passphrase_hint: bool,
 }
 
-/// Parse a container/volume keybag into observed state.
-pub fn read_keybag(_data: &[u8]) -> crate::Result<EncryptionState> {
-    todo!("P7: parse keybag entries by tag; report state, never derive keys")
+// `kb_locker` header field offsets, then 16-byte-aligned `keybag_entry_t`s.
+const KL_NKEYS: usize = 2; // u16
+const KL_ENTRIES_OFF: usize = 16; // entries begin after the 16-byte header
+const KE_TAG: usize = 16; // u16 within an entry
+const KE_KEYLEN: usize = 18; // u16 within an entry
+const KE_HEADER_LEN: usize = 24; // uuid(16) + tag(2) + keylen(2) + pad(4)
+/// Cap on `kl_nkeys` (a hostile blob must not drive an unbounded loop).
+const MAX_KEYBAG_ENTRIES: usize = 4096;
+
+/// Parse a container/volume keybag (`kb_locker`) into observed state — which
+/// tags are present, whether a passphrase hint exists, and whether key material
+/// is present — **without** unwrapping any key.
+///
+/// # Errors
+/// [`crate::ApfsError::Io`] never (in-memory); returns `Ok` with whatever the
+/// blob structurally yields. A malformed entry stops the walk early rather than
+/// over-reading.
+pub fn read_keybag(data: &[u8]) -> crate::Result<EncryptionState> {
+    let nkeys = (crate::bytes::le_u16(data, KL_NKEYS) as usize).min(MAX_KEYBAG_ENTRIES);
+    let mut tags_present = Vec::new();
+    let mut off = KL_ENTRIES_OFF;
+    for _ in 0..nkeys {
+        // Stop if the entry header would run past the blob (never over-read).
+        if off + KE_HEADER_LEN > data.len() {
+            break;
+        }
+        let tag = KeybagTag::from_u16(crate::bytes::le_u16(data, off + KE_TAG));
+        let keylen = crate::bytes::le_u16(data, off + KE_KEYLEN) as usize;
+        if !tags_present.contains(&tag) {
+            tags_present.push(tag);
+        }
+        // Advance by the 16-byte-aligned entry size.
+        let entry_len = (KE_HEADER_LEN + keylen + 15) & !15;
+        off += entry_len.max(16);
+    }
+    let has_passphrase_hint = tags_present.contains(&KeybagTag::VolumePassphraseHint);
+    // "Encrypted" = actual key material is present (a wrapping key, a wrapped
+    // volume key, or the volume-keybag unlock records).
+    let encrypted = tags_present.iter().any(|t| {
+        matches!(
+            t,
+            KeybagTag::WrappingKey | KeybagTag::VolumeKey | KeybagTag::VolumeUnlockRecords
+        )
+    });
+    Ok(EncryptionState {
+        encrypted,
+        tags_present,
+        has_passphrase_hint,
+    })
 }
 
 #[cfg(test)]
