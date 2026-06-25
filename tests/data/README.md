@@ -277,10 +277,9 @@ hdiutil create -size 64m -encryption -stdinpass -fs APFS -volname APFSENC apfsen
   ```
   (`~/p5share/mint.sh` automates the in-VM steps. Host→VM SSH is gated by macOS
   Local Network Privacy; the loopback VNC + `--dir` share avoids needing it.)
-- **Performance caveat.** One `open_path` on the real ~50 GB Data volume took
-  **~83 min** — navigation is currently quadratic (see `docs/validation.md` P5).
-  The validation passed; the test is slow on real volumes until keyed B-tree
-  descent lands.
+- **Performance.** With keyed `omap.resolve` (point descent), this test runs in
+  **~5 s** on the real ~50 GB volume — down from ~83 min before the keyed descent
+  (see `docs/validation.md` P5).
 - **Consumed by:** `core/tests/snapshot.rs` (env-gated populated test).
 
 > The committed P5 validations (empty snap-meta tree, `mount_snapshot` seam, walk

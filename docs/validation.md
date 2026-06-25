@@ -230,13 +230,14 @@ the container omap. Gated on `APFS_P5_FIXTURE` (+ `APFS_P5_PART_OFFSET`,
 `APFS_P5_FILE`, `APFS_P5_V1_SHA256`, `APFS_P5_V2_SHA256`); **skips cleanly** when
 absent. See `tests/data/README.md` for the mint recipe and recorded values.
 
-> **Performance caveat (pre-existing, P1–P4, not P5).** Navigation is currently
-> quadratic — `omap.resolve` full-scans the omap B-tree and is called per node by
-> a full fs-tree walk (`for_each_fs_record`), per path component. On the tiny
-> committed fixtures this is instant, but one `open_path` on the real ~50 GB
-> Data volume took **~83 min** (the validation run above). Correctness is
-> oracle-confirmed; the slowness is a separate keyed-B-tree-descent optimization
-> (`omap.rs` + `dir.rs`), tracked independently.
+> **Performance (keyed omap descent).** `omap.resolve` is a **keyed point
+> descent** (`btree::find_leaf`): it reads one root→leaf path instead of scanning
+> the whole omap B-tree on every node-resolution. This cut the real-fixture
+> validation run from **~4962 s (~83 min) to ~5 s** — same byte-identical result.
+> The residual cost is the full fs-tree walk per path component
+> (`for_each_fs_record`); a keyed fs-tree lookup in `dir.rs` is the next
+> optimization if sub-second reads are wanted, but reads are now practical on
+> real volumes.
 
 > **Minting blocker (host capability, documented).** Creating an APFS snapshot on
 > an arbitrary (DMG) volume requires the `com.apple.developer.vfs.snapshot`
