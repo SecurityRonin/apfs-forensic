@@ -136,7 +136,37 @@ impl AnomalyKind {
 
 impl Observation for AnomalyKind {
     fn severity(&self) -> Option<Severity> {
-        todo!("P9: per-variant grading (Critical/High/Medium/Low/Info per design table)")
+        // Grades from the design-doc anomaly table. Codex's tempering applies:
+        // copy-on-write residue and FP-prone leads are Info; only structural
+        // contradictions and integrity breaks are High.
+        Some(match self {
+            Self::ObjectChecksumMismatch { .. }
+            | Self::OmapInconsistent { .. }
+            | Self::CheckpointRingMalformed { .. }
+            | Self::SealedVolumeHashMismatch { .. }
+            | Self::SealedVolumeBroken { .. }
+            | Self::XidReuse { .. } => Severity::High,
+
+            Self::SnapshotMissingMetadata { .. }
+            | Self::DeletedInodeRecoverable { .. }
+            | Self::EncryptionKeybagAnomaly { .. } => Severity::Medium,
+
+            Self::DeletedExtentCarveCandidate { .. }
+            | Self::ReaperPendingObject { .. }
+            | Self::CloneFlagWithoutSharing { .. }
+            | Self::OrphanInode { .. } => Severity::Low,
+
+            Self::OmapOrphanMapping { .. }
+            | Self::CheckpointSupersededState { .. }
+            | Self::SnapshotXidDisorder { .. }
+            | Self::SnapshotDivergence { .. }
+            | Self::CloneSharedExtent { .. }
+            | Self::EncryptionLocked
+            | Self::EncryptionState { .. }
+            | Self::TimestampZeroed { .. }
+            | Self::TimestampOrder { .. }
+            | Self::VolumeRoleMismatch { .. } => Severity::Info,
+        })
     }
 
     fn code(&self) -> &'static str {
@@ -144,7 +174,83 @@ impl Observation for AnomalyKind {
     }
 
     fn note(&self) -> String {
-        todo!("P9: human note carrying the raw offending values (show-the-value rule)")
+        // "Consistent with …", never a verdict — the examiner/tribunal concludes.
+        // Every raw offending value (block, oid/xid, tag, name) is surfaced.
+        match self {
+            Self::ObjectChecksumMismatch {
+                block,
+                stored,
+                computed,
+            } => format!(
+                "object at block {block} has stored Fletcher-64 {stored:#018x} but its body computes {computed:#018x}; consistent with structural corruption or tampering"
+            ),
+            Self::OmapInconsistent { oid, xid } => format!(
+                "object-map entry for oid {oid} at xid {xid} resolves to a block whose object oid/xid/type disagrees; consistent with omap inconsistency"
+            ),
+            Self::OmapOrphanMapping { oid } => format!(
+                "object-map entry for oid {oid} targets a block not reachable from any live tree examined; consistent with an orphaned mapping (reachability not exhaustively modelled)"
+            ),
+            Self::CheckpointRingMalformed { detail } => format!(
+                "checkpoint ring is structurally invalid: {detail}; consistent with a malformed or truncated checkpoint area"
+            ),
+            Self::CheckpointSupersededState { xid } => format!(
+                "a non-latest checkpoint at xid {xid} references objects absent from the latest; consistent with normal copy-on-write residue (a recovery lead)"
+            ),
+            Self::SnapshotXidDisorder { xid } => format!(
+                "snapshot xid {xid} is not ordered consistently with its create_time; a lead for the examiner"
+            ),
+            Self::SnapshotMissingMetadata { name } => format!(
+                "snapshot \"{name}\" appears in one of the snap-metadata / snap-name trees but not the other; consistent with a structural snapshot inconsistency"
+            ),
+            Self::SnapshotDivergence { inode } => format!(
+                "a snapshot's view of inode {inode} differs from the live volume; a history lead, not an anomaly in itself"
+            ),
+            Self::SealedVolumeHashMismatch { inode } => format!(
+                "sealed-volume file-info hash for inode {inode} does not match the recomputed content hash; consistent with a hash-metadata mismatch (not a trust-chain verdict)"
+            ),
+            Self::SealedVolumeBroken { broken_xid } => format!(
+                "integrity_meta_phys.im_broken_xid is set to {broken_xid}; consistent with the seal having been broken at that transaction"
+            ),
+            Self::DeletedInodeRecoverable { oid } => format!(
+                "inode/dir record for oid {oid} is superseded but still present in an older checkpoint or unreaped block; consistent with recoverable residue"
+            ),
+            Self::DeletedExtentCarveCandidate { block } => format!(
+                "a deleted file's extent block {block} is marked free in the allocation bitmap; a carve candidate only (free does not guarantee recoverable content)"
+            ),
+            Self::ReaperPendingObject { oid } => format!(
+                "object oid {oid} is queued in the reaper (logically deleted, still physically present); a residue lead"
+            ),
+            Self::CloneSharedExtent { inode_a, inode_b } => format!(
+                "inodes {inode_a} and {inode_b} share one or more physical extents; consistent with a clonefile/dedup provenance link"
+            ),
+            Self::CloneFlagWithoutSharing { inode } => format!(
+                "inode {inode} has INODE_WAS_CLONED set but no shared extent was found; consistent with a clone-flag inconsistency"
+            ),
+            Self::EncryptionLocked => {
+                "volume is encrypted and no key is available; content is not readable (a state, not a verdict)".to_string()
+            }
+            Self::EncryptionState { detail } => {
+                format!("observed encryption state: {detail} (raw fields; software-vs-hardware not inferred)")
+            }
+            Self::EncryptionKeybagAnomaly { raw_tag, offset } => format!(
+                "keybag entry at offset {offset} carries an unexpected or malformed tag {raw_tag:#04x}; consistent with a keybag anomaly"
+            ),
+            Self::TimestampZeroed { inode } => format!(
+                "inode {inode} has one timestamp zeroed while its siblings are set; an Info lead (possible wipe)"
+            ),
+            Self::TimestampOrder { inode } => format!(
+                "inode {inode} has timestamps out of expected order (e.g. change_time before create_time); an FP-prone Info lead"
+            ),
+            Self::XidReuse { oid, xid } => format!(
+                "two distinct live objects claim the same (oid {oid}, xid {xid}); impossible under copy-on-write, consistent with tampering"
+            ),
+            Self::OrphanInode { oid } => format!(
+                "inode {oid} has no DIR_REC referencing it and is not in the private directory; consistent with deleted-but-linked residue"
+            ),
+            Self::VolumeRoleMismatch { detail } => format!(
+                "volume role flag is inconsistent with content: {detail}; a structural lead"
+            ),
+        }
     }
 }
 
@@ -244,28 +350,25 @@ mod observation_tests {
     /// (fleet "show the unrecognized value" rule) — never a value-less message.
     #[test]
     fn note_carries_raw_offending_values() {
-        // checksum: block, stored, computed must all appear.
+        // checksum: block (decimal) + stored/computed (hex) must all appear.
         let n = ObjectChecksumMismatch {
-            block: 0x1234,
+            block: 4660,
             stored: 0xaa,
             computed: 0xbb,
         }
         .note();
         assert!(
-            n.contains("1234") && n.contains("aa") && n.contains("bb"),
+            n.contains("4660") && n.contains("aa") && n.contains("bb"),
             "{n}"
         );
 
-        // keybag anomaly: raw tag (hex) + offset.
+        // keybag anomaly: raw tag (hex) + offset (decimal).
         let n = EncryptionKeybagAnomaly {
             raw_tag: 0x7f,
-            offset: 0x40,
+            offset: 64,
         }
         .note();
-        assert!(
-            n.contains("7f") && n.contains("64") || n.contains("0x40"),
-            "{n}"
-        );
+        assert!(n.contains("0x7f") && n.contains("64"), "{n}");
 
         // names/details pass through.
         assert!(SnapshotMissingMetadata {
@@ -275,7 +378,7 @@ mod observation_tests {
         .contains("APFSP5.snap1"));
     }
 
-    /// note() is an observation, never a verdict (no "proves"/"confirms"/"is").
+    /// `note()` is an observation, never a verdict (no "proves"/"confirms").
     #[test]
     fn notes_are_observations_not_verdicts() {
         let n = SealedVolumeHashMismatch { inode: 5 }.note().to_lowercase();
