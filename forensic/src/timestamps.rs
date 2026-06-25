@@ -26,13 +26,25 @@ pub fn audit(inode: &apfs_core::inode::Inode) -> Vec<AnomalyKind> {
 /// or out-of-order values have benign explanations, so these guide an examiner
 /// rather than assert tampering.
 fn timestamp_anomalies(
-    _oid: u64,
-    _create: u64,
-    _modify: u64,
-    _change: u64,
-    _access: u64,
+    oid: u64,
+    create: u64,
+    modify: u64,
+    change: u64,
+    access: u64,
 ) -> Vec<AnomalyKind> {
-    Vec::new() // RED stub
+    let mut out = Vec::new();
+    let ts = [create, modify, change, access];
+    // One timestamp zeroed while siblings are set — a possible-wipe lead.
+    if ts.iter().any(|&t| t != 0) && ts.contains(&0) {
+        out.push(AnomalyKind::TimestampZeroed { inode: oid });
+    }
+    // Out-of-order: change before create, or access before create (both set).
+    let order_broken = (change != 0 && create != 0 && change < create)
+        || (access != 0 && create != 0 && access < create);
+    if order_broken {
+        out.push(AnomalyKind::TimestampOrder { inode: oid });
+    }
+    out
 }
 
 #[cfg(test)]
