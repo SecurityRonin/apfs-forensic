@@ -40,8 +40,18 @@ pub fn audit<R: std::io::Read + std::io::Seek>(
 /// Pure ordering check (Humble Object): with snapshots in ascending-xid order,
 /// `create_time` must be non-decreasing. A later xid that predates an earlier
 /// one's creation is an `APFS-SNAPSHOT-XID-DISORDER` lead.
-fn snapshot_xid_disorder(_snaps: &[(u64, u64)]) -> Vec<AnomalyKind> {
-    Vec::new() // RED stub
+fn snapshot_xid_disorder(snaps: &[(u64, u64)]) -> Vec<AnomalyKind> {
+    let mut sorted: Vec<(u64, u64)> = snaps.to_vec();
+    sorted.sort_by_key(|&(xid, _)| xid);
+    let mut out = Vec::new();
+    for w in sorted.windows(2) {
+        let ((_, t0), (xid1, t1)) = (w[0], w[1]);
+        // Both creation times set, but the later-xid snapshot is older.
+        if t0 != 0 && t1 != 0 && t1 < t0 {
+            out.push(AnomalyKind::SnapshotXidDisorder { xid: xid1 });
+        }
+    }
+    out
 }
 
 #[cfg(test)]
