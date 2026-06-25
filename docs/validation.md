@@ -83,6 +83,26 @@ Reference* and the libfsapfs format spec before implementation, not from memory.
 corpus ⇒ Tier 2 (`min(independent, self-minted)`). A Tier-1 lift needs the same
 resolution run on a real-world / third-party image (env-gated, future work).
 
+### Fusion container detection + fail-loud (P1/P2 robustness) — Tier 2
+
+A Fusion (SSD+HDD) container resolves physical addresses tier-aware (a tier bit
+in the high address, via the fusion middle tree). This reader does not yet
+implement that translation (full support is P8), so reading a Fusion image
+*without* it would silently mis-address blocks — the worst failure class. Per the
+design (risk #6), detection + loud rejection lands early.
+
+`ApfsContainer::open` checks the NXSB `nx_incompatible_features` `NX_INCOMPAT_FUSION`
+bit (offset 64, value `0x100`, Apple *APFS Reference*) on the bootstrap superblock
+— before walking the checkpoint ring or resolving any address — and returns
+`ApfsError::UnsupportedFusion` rather than proceed.
+
+**What is exercised** (`core/tests/container_open.rs`):
+
+| Claim | Evidence | Oracle |
+|---|---|---|
+| Fusion container is rejected at open | the real `apfs_nxsb_head.bin` with `NX_INCOMPAT_FUSION` set (+ re-stamped Fletcher-64) opens to `UnsupportedFusion`, never a mis-read | construction (documented spec bit) on a real container |
+| non-Fusion container is unaffected | the unmodified real container still opens and resolves its geometry | real Apple-minted fixture (**Tier 2**) |
+
 ### Volume superblock + fs-record dispatch + inode metadata + name→inode (P3) — Tier 2
 
 **Corpus:** `tests/data/apfs_fstree.bin` — blocks 0–373 (1.46 MiB) of a real APFS
