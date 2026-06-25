@@ -35,8 +35,15 @@ pub fn audit<R: std::io::Read + std::io::Seek>(
 /// Pure clone-finding logic (Humble Object). `shared` is `(inode_a, inode_b)`
 /// pairs that share a physical extent; `flagged_unshared` is inodes whose
 /// `INODE_WAS_CLONED` flag is set with no shared extent found.
-fn clone_anomalies(_shared: &[(u64, u64)], _flagged_unshared: &[u64]) -> Vec<AnomalyKind> {
-    Vec::new() // RED stub
+fn clone_anomalies(shared: &[(u64, u64)], flagged_unshared: &[u64]) -> Vec<AnomalyKind> {
+    let mut out = Vec::new();
+    for &(inode_a, inode_b) in shared {
+        out.push(AnomalyKind::CloneSharedExtent { inode_a, inode_b });
+    }
+    for &inode in flagged_unshared {
+        out.push(AnomalyKind::CloneFlagWithoutSharing { inode });
+    }
+    out
 }
 
 #[cfg(test)]
