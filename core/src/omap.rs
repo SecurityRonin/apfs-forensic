@@ -172,13 +172,22 @@ impl ObjectMap {
         block_size: usize,
     ) -> crate::Result<OmapEntry> {
         let mut best: Option<OmapEntry> = None;
-        btree::for_each_leaf_entry(
+        // Keyed point descent: read one root→leaf path instead of the whole tree.
+        // The omap is keyed by (ok_oid, ok_xid); the entry we want — the largest
+        // ok_xid ≤ xid for this oid — is the floor of (oid, xid), which lives in
+        // the single leaf this descent lands on, so scanning that leaf suffices.
+        btree::find_leaf(
             reader,
             self.tree_oid,
             block_size,
             BTreeSubtype::Omap,
-            &mut |key, value| {
+            |key| {
                 // omap_key { ok_oid u64 @0, ok_xid u64 @8 }
+                let k_oid = crate::bytes::le_u64(key, 0);
+                let k_xid = crate::bytes::le_u64(key, 8);
+                (k_oid, k_xid).cmp(&(oid, xid))
+            },
+            &mut |key, value| {
                 let k_oid = crate::bytes::le_u64(key, 0);
                 let k_xid = crate::bytes::le_u64(key, 8);
                 if k_oid != oid || k_xid > xid {
