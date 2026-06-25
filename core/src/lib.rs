@@ -28,9 +28,12 @@
 //!
 //! # Scaffold notice
 //!
-//! This is a **design skeleton** — module layout and public signatures reflect
-//! the design at `docs/plans/2026-06-21-apfs-forensic-design.md`. Function
-//! bodies are `todo!()` stubs and parsers are not yet implemented.
+//! Implements phases P1–P8 of `docs/plans/2026-06-21-apfs-forensic-design.md`:
+//! container open + checkpoint, object map / B-tree, volume superblock, inode /
+//! directory navigation, file extents + decmpfs + xattrs, snapshots + point-in-
+//! time view, the space manager (allocation bitmap) + reaper, and keybag /
+//! sealed-volume metadata parsing. Full Fusion address translation is the one
+//! remaining gap (rejected loudly at open until a Fusion fixture exists).
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
