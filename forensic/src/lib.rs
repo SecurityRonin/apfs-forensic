@@ -161,3 +161,127 @@ pub fn audit_container<R: std::io::Read + std::io::Seek>(
 pub fn audit_volume(_volume: &apfs_core::volume::ApfsVolume) -> Vec<AnomalyKind> {
     todo!("P9")
 }
+
+#[cfg(test)]
+mod observation_tests {
+    use super::AnomalyKind::*;
+    use super::*;
+
+    /// Every variant's severity must match the published design-doc grading.
+    #[test]
+    fn severity_matches_design_table() {
+        use Severity::*;
+        let cases: &[(AnomalyKind, Severity)] = &[
+            (
+                ObjectChecksumMismatch {
+                    block: 1,
+                    stored: 2,
+                    computed: 3,
+                },
+                High,
+            ),
+            (OmapInconsistent { oid: 1, xid: 2 }, High),
+            (OmapOrphanMapping { oid: 1 }, Info),
+            (CheckpointRingMalformed { detail: "x" }, High),
+            (CheckpointSupersededState { xid: 1 }, Info),
+            (SnapshotXidDisorder { xid: 1 }, Info),
+            (
+                SnapshotMissingMetadata {
+                    name: "s".to_string(),
+                },
+                Medium,
+            ),
+            (SnapshotDivergence { inode: 1 }, Info),
+            (SealedVolumeHashMismatch { inode: 1 }, High),
+            (SealedVolumeBroken { broken_xid: 1 }, High),
+            (DeletedInodeRecoverable { oid: 1 }, Medium),
+            (DeletedExtentCarveCandidate { block: 1 }, Low),
+            (ReaperPendingObject { oid: 1 }, Low),
+            (
+                CloneSharedExtent {
+                    inode_a: 1,
+                    inode_b: 2,
+                },
+                Info,
+            ),
+            (CloneFlagWithoutSharing { inode: 1 }, Low),
+            (EncryptionLocked, Info),
+            (
+                EncryptionState {
+                    detail: "d".to_string(),
+                },
+                Info,
+            ),
+            (
+                EncryptionKeybagAnomaly {
+                    raw_tag: 0x99,
+                    offset: 16,
+                },
+                Medium,
+            ),
+            (TimestampZeroed { inode: 1 }, Info),
+            (TimestampOrder { inode: 1 }, Info),
+            (XidReuse { oid: 1, xid: 2 }, High),
+            (OrphanInode { oid: 1 }, Low),
+            (
+                VolumeRoleMismatch {
+                    detail: "r".to_string(),
+                },
+                Info,
+            ),
+        ];
+        for (k, want) in cases {
+            assert_eq!(
+                k.severity(),
+                Some(*want),
+                "{} should grade {want:?}",
+                AnomalyKind::code(k)
+            );
+        }
+    }
+
+    /// Findings that carry raw offending values must surface them in the note
+    /// (fleet "show the unrecognized value" rule) — never a value-less message.
+    #[test]
+    fn note_carries_raw_offending_values() {
+        // checksum: block, stored, computed must all appear.
+        let n = ObjectChecksumMismatch {
+            block: 0x1234,
+            stored: 0xaa,
+            computed: 0xbb,
+        }
+        .note();
+        assert!(
+            n.contains("1234") && n.contains("aa") && n.contains("bb"),
+            "{n}"
+        );
+
+        // keybag anomaly: raw tag (hex) + offset.
+        let n = EncryptionKeybagAnomaly {
+            raw_tag: 0x7f,
+            offset: 0x40,
+        }
+        .note();
+        assert!(
+            n.contains("7f") && n.contains("64") || n.contains("0x40"),
+            "{n}"
+        );
+
+        // names/details pass through.
+        assert!(SnapshotMissingMetadata {
+            name: "APFSP5.snap1".to_string()
+        }
+        .note()
+        .contains("APFSP5.snap1"));
+    }
+
+    /// note() is an observation, never a verdict (no "proves"/"confirms"/"is").
+    #[test]
+    fn notes_are_observations_not_verdicts() {
+        let n = SealedVolumeHashMismatch { inode: 5 }.note().to_lowercase();
+        assert!(
+            !n.contains("proves") && !n.contains("confirms") && !n.contains("modified by"),
+            "sealed-volume note must not assert a trust verdict: {n}"
+        );
+    }
+}
