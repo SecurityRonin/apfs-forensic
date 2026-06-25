@@ -170,6 +170,15 @@ impl<R: Read + Seek> ApfsContainer<R> {
         // Parse + validate the block-zero bootstrap superblock (magic + cksum).
         let bootstrap = container::NxSuperblock::parse(&block0)?;
 
+        // Fail loud on a Fusion container BEFORE trusting any addressing: the
+        // `nx_incompatible_features` Fusion bit means physical-address resolution
+        // is tier-aware, which this reader does not yet implement. Detect it on
+        // the bootstrap (the flag is set at container creation and invariant
+        // across checkpoints) and reject rather than silently mis-read.
+        if fusion::is_fusion(&bootstrap) {
+            return Err(ApfsError::UnsupportedFusion);
+        }
+
         // Walk the checkpoint ring to the live superblock.
         let live = checkpoint::resolve_live_checkpoint(&mut reader, &bootstrap)?;
 

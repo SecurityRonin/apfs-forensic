@@ -12,11 +12,11 @@
 //! address split **or** detect a Fusion container and fail loud with
 //! [`crate::ApfsError::UnsupportedFusion`] — never silently mis-read addresses.
 
-/// Detect whether a container is a Fusion container (from NXSB feature flags /
-/// presence of a tier-2 device).
+/// Detect whether a container is a Fusion container, from the
+/// `NX_INCOMPAT_FUSION` bit in the NXSB `nx_incompatible_features` word.
 #[must_use]
-pub fn is_fusion(_superblock: &crate::container::NxSuperblock) -> bool {
-    todo!("P1/P2: detect Fusion via incompatible-feature flag")
+pub fn is_fusion(superblock: &crate::container::NxSuperblock) -> bool {
+    superblock.incompatible_features & crate::container::NX_INCOMPAT_FUSION != 0
 }
 
 /// Translate a (possibly tier-flagged) Fusion physical address to a device +

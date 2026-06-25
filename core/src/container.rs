@@ -16,6 +16,12 @@
 pub const NX_MAGIC: u32 = 0x4253_584E;
 
 /// Smallest / default / largest block size and minimum container size (Apple).
+/// `NX_INCOMPAT_FUSION` — the `nx_incompatible_features` bit set on a Fusion
+/// (SSD+HDD) container (Apple *APFS Reference*). A reader that does not implement
+/// tier-aware address translation must reject such a container rather than
+/// mis-read physical addresses (see [`crate::fusion`]).
+pub const NX_INCOMPAT_FUSION: u64 = 0x100;
+
 pub const NX_MINIMUM_BLOCK_SIZE: u32 = 4096;
 pub const NX_DEFAULT_BLOCK_SIZE: u32 = 4096;
 pub const NX_MAXIMUM_BLOCK_SIZE: u32 = 65536;
@@ -34,6 +40,7 @@ const XP_BLOCKS_TREE_FLAG: u32 = 0x8000_0000;
 const OFF_MAGIC: usize = 32; // nx_magic           u32
 const OFF_BLOCK_SIZE: usize = 36; // nx_block_size  u32
 const OFF_BLOCK_COUNT: usize = 40; // nx_block_count u64
+const OFF_INCOMPAT_FEATURES: usize = 64; // nx_incompatible_features u64
 const OFF_UUID: usize = 72; // nx_uuid            uuid_t (16)
 const OFF_XP_DESC_BLOCKS: usize = 104; // nx_xp_desc_blocks u32
 const OFF_XP_DATA_BLOCKS: usize = 108; // nx_xp_data_blocks u32
@@ -55,6 +62,10 @@ pub struct NxSuperblock {
     pub block_size: u32,
     /// `nx_block_count`.
     pub block_count: u64,
+    /// `nx_incompatible_features` — feature bits a reader must understand to
+    /// mount safely (e.g. [`NX_INCOMPAT_FUSION`]); an unrecognised bit means the
+    /// image cannot be read correctly.
+    pub incompatible_features: u64,
     /// Checkpoint descriptor-area base (`nx_xp_desc_base`) — a block address
     /// when contiguous, or a B-tree oid when [`Self::xp_desc_is_tree`].
     pub xp_desc_base: u64,
@@ -120,6 +131,7 @@ impl NxSuperblock {
         let uuid = crate::bytes::arr::<16>(block, OFF_UUID);
         let block_size = crate::bytes::le_u32(block, OFF_BLOCK_SIZE);
         let block_count = crate::bytes::le_u64(block, OFF_BLOCK_COUNT);
+        let incompatible_features = crate::bytes::le_u64(block, OFF_INCOMPAT_FEATURES);
 
         let desc_blocks_raw = crate::bytes::le_u32(block, OFF_XP_DESC_BLOCKS);
         let data_blocks_raw = crate::bytes::le_u32(block, OFF_XP_DATA_BLOCKS);
@@ -145,6 +157,7 @@ impl NxSuperblock {
             uuid,
             block_size,
             block_count,
+            incompatible_features,
             xp_desc_base: crate::bytes::le_u64(block, OFF_XP_DESC_BASE),
             xp_desc_blocks: desc_blocks_raw & !XP_BLOCKS_TREE_FLAG,
             xp_data_base: crate::bytes::le_u64(block, OFF_XP_DATA_BASE),
