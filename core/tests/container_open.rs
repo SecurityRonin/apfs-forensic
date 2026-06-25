@@ -5,9 +5,28 @@
 
 use std::io::Cursor;
 
-use apfs_core::ApfsContainer;
+use apfs_core::object::fletcher64_checksum;
+use apfs_core::{ApfsContainer, ApfsError};
 
 const HEAD: &[u8] = include_bytes!("../../tests/data/apfs_nxsb_head.bin");
+
+/// `NX_INCOMPAT_FUSION` (Apple *APFS Reference*, `nx_incompatible_features`).
+const NX_INCOMPAT_FUSION: u64 = 0x100;
+/// `nx_incompatible_features` byte offset within `nx_superblock_t`.
+const OFF_INCOMPAT: usize = 64;
+
+/// Set the Fusion incompatible-feature bit in block 0's NXSB and re-stamp its
+/// Fletcher-64 so the (now-Fusion) superblock still passes the checksum gate.
+fn with_fusion_bit(image: &[u8]) -> Vec<u8> {
+    let mut img = image.to_vec();
+    let mut feats = u64::from_le_bytes(img[OFF_INCOMPAT..OFF_INCOMPAT + 8].try_into().unwrap());
+    feats |= NX_INCOMPAT_FUSION;
+    img[OFF_INCOMPAT..OFF_INCOMPAT + 8].copy_from_slice(&feats.to_le_bytes());
+    // Re-stamp the checksum (first 8 bytes) over the modified block.
+    let cks = fletcher64_checksum(&img[..4096]);
+    img[0..8].copy_from_slice(&cks.to_le_bytes());
+    img
+}
 
 #[test]
 fn open_resolves_live_superblock_geometry() {
@@ -29,6 +48,26 @@ fn open_resolves_live_superblock_geometry() {
     );
     // The checkpoint resolved the live superblock at descriptor block 4.
     assert_eq!(container.live_superblock_paddr(), 4);
+}
+
+#[test]
+fn open_fails_loud_on_fusion_container() {
+    // Fusion changes physical-address resolution; until tier-aware translation
+    // lands, a Fusion container must be REJECTED at open, never silently
+    // mis-read. Take the real container, set NX_INCOMPAT_FUSION (+ re-stamp the
+    // checksum so it still parses), and require a loud UnsupportedFusion.
+    let fusion = with_fusion_bit(HEAD);
+    match ApfsContainer::open(Cursor::new(fusion)) {
+        Err(ApfsError::UnsupportedFusion) => {}
+        Err(other) => panic!("expected UnsupportedFusion, got {other:?}"),
+        Ok(_) => panic!("expected UnsupportedFusion, but open() succeeded on a Fusion container"),
+    }
+}
+
+#[test]
+fn open_does_not_flag_real_non_fusion_container() {
+    // Regression: the unmodified real container has no Fusion bit and must open.
+    assert!(ApfsContainer::open(Cursor::new(HEAD)).is_ok());
 }
 
 #[test]
