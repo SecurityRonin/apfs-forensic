@@ -25,11 +25,24 @@ pub fn audit(state: &apfs_core::encryption::EncryptionState) -> Vec<AnomalyKind>
 /// `ENCRYPTION-KEYBAG-ANOMALY` per unrecognised keybag tag carrying its raw value
 /// and offset (never classifies software-vs-hardware).
 fn crypto_anomalies(
-    _encrypted: bool,
-    _detail: &str,
-    _unknown_tags: &[(u16, u64)],
+    encrypted: bool,
+    detail: &str,
+    unknown_tags: &[(u16, u64)],
 ) -> Vec<AnomalyKind> {
-    Vec::new() // RED stub
+    let mut out = Vec::new();
+    if encrypted {
+        out.push(AnomalyKind::EncryptionLocked);
+        out.push(AnomalyKind::EncryptionState {
+            detail: detail.to_string(),
+        });
+    }
+    for &(raw_tag, offset) in unknown_tags {
+        out.push(AnomalyKind::EncryptionKeybagAnomaly {
+            raw_tag: (raw_tag & 0xff) as u8,
+            offset,
+        });
+    }
+    out
 }
 
 #[cfg(test)]
