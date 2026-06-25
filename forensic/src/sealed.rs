@@ -12,11 +12,45 @@
 use crate::AnomalyKind;
 
 /// Validate a sealed volume's integrity metadata.
+///
+/// Flags a recorded broken seal (`im_broken_xid != 0`). Per-file hash
+/// recomputation vs the seal (`APFS-SEALED-VOLUME-HASH-MISMATCH`) is **not**
+/// performed here: Apple's exact content-canonicalization is the least-documented
+/// and highest-false-positive area, and the design requires validating it only
+/// against a real Signed System Volume image + `apfsck` (never a synthetic seal
+/// we compute ourselves — the Tier-3 trap). It is gated on such a fixture.
 #[must_use]
 pub fn audit<R: std::io::Read + std::io::Seek>(
     _reader: &mut R,
     _volume: &apfs_core::volume::ApfsVolume,
-    _meta: &apfs_core::sealed::IntegrityMeta,
+    meta: &apfs_core::sealed::IntegrityMeta,
 ) -> Vec<AnomalyKind> {
-    todo!("P9: recompute file-info hashes vs seal; check im_broken_xid")
+    sealed_anomalies(meta.broken_xid)
+}
+
+/// Pure sealed-volume audit logic (Humble Object: testable without an
+/// `IntegrityMeta`). A non-zero `im_broken_xid` records that the seal was broken
+/// at a known transaction — reported as an observation, not a "system volume was
+/// modified" verdict (that trust-chain conclusion is for the examiner).
+fn sealed_anomalies(_broken_xid: u64) -> Vec<AnomalyKind> {
+    Vec::new() // RED stub
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intact_seal_has_no_findings() {
+        assert!(sealed_anomalies(0).is_empty());
+    }
+
+    #[test]
+    fn broken_xid_is_flagged_with_value() {
+        let v = sealed_anomalies(42);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].code(), "APFS-SEALED-VOLUME-BROKEN");
+        let note = forensicnomicon::report::Observation::note(&v[0]);
+        assert!(note.contains("42"), "{note}");
+    }
 }
