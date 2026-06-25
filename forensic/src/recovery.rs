@@ -42,8 +42,11 @@ pub fn audit<R: std::io::Read + std::io::Seek>(
 
 /// Pure mapping (Humble Object): each reaper-pending object id → a Low
 /// `APFS-REAPER-PENDING-OBJECT` residue lead.
-fn reaper_anomalies(_pending_oids: &[u64]) -> Vec<AnomalyKind> {
-    Vec::new() // RED stub
+fn reaper_anomalies(pending_oids: &[u64]) -> Vec<AnomalyKind> {
+    pending_oids
+        .iter()
+        .map(|&oid| AnomalyKind::ReaperPendingObject { oid })
+        .collect()
 }
 
 #[cfg(test)]
