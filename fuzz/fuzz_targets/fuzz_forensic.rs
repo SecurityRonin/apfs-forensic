@@ -5,7 +5,7 @@ use libfuzzer_sys::fuzz_target;
 use std::io::Cursor;
 
 fuzz_target!(|data: &[u8]| {
-    if let Ok(container) = apfs_core::ApfsContainer::open(Cursor::new(data.to_vec())) {
-        let _ = apfs_forensic::audit_container(&container);
-    }
+    // audit_container now opens the container itself from a reader + block size.
+    let mut cur = Cursor::new(data.to_vec());
+    let _ = apfs_forensic::audit_container(&mut cur, 4096);
 });
