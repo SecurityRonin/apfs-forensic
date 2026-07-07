@@ -29,6 +29,15 @@ chrono = { workspace = true }
 flate2 = { workspace = true }
 lzfse_rust = { workspace = true }
 lzvn = { workspace = true }
+# forensic-vfs (KNOWLEDGE leaf) — the read-only FileSystem navigation contract.
+# Optional so a bare reader stays dependency-light; the `vfs` feature turns on
+# the `impl FileSystem for ApfsFs` adapter so an APFS volume composes as
+# `Arc<dyn FileSystem>` (mirrors ntfs-core's `vfs` feature).
+forensic-vfs = { version = "0.1", optional = true }
+
+[features]
+# Adapt `ApfsFs` to the forensic-vfs `FileSystem` trait (see `src/vfs.rs`).
+vfs = ["dep:forensic-vfs"]
 
 [dev-dependencies]
 # SHA-256 to reconcile assembled file bytes against the macOS `cp` oracle.
