@@ -24,6 +24,7 @@ dependencies = [
  "bitflags",
  "chrono",
  "flate2",
+ "forensic-vfs",
  "forensicnomicon",
  "lzfse_rust",
  "lzvn-core",
@@ -154,6 +155,15 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+]
+
+[[package]]
+name = "forensic-vfs"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e1fd9ca5012d956da1cd418e2c40732f3e7d18638cd8705551e04fc7cc67030"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]

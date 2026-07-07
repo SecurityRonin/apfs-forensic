@@ -55,6 +55,8 @@ pub mod reaper;
 pub mod sealed;
 pub mod snapshot;
 pub mod spaceman;
+#[cfg(feature = "vfs")]
+pub mod vfs;
 pub mod volume;
 pub mod xattr;
 

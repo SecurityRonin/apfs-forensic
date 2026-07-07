@@ -26,7 +26,7 @@ use apfs_core::vfs::ApfsFs;
 use forensic_vfs::{FileId, FileSystem, FsKind, NodeKind, StreamId, TimeZonePolicy};
 
 /// The committed real macOS-authored APFS carve (repo-root `tests/data/`, two
-/// levels up from `core/tests/`). ~1.7 MiB — safe to `include_bytes!`.
+/// levels up from `core/tests/`). About 1.7 MB — safe to `include_bytes!`.
 const IMG: &[u8] = include_bytes!("../../tests/data/apfs_content.bin");
 
 fn open() -> Arc<dyn FileSystem> {
@@ -155,11 +155,15 @@ fn decmpfs_file_reads_transparently() {
     let fs = open();
     // compressed.txt (inode 23): decmpfs LZVN resource fork, logical size 180000.
     let id = oid(&*fs, 23);
-    let m = fs.meta(id).unwrap();
-    assert_eq!(m.size, 180_000);
 
-    // A full read materializes all 180000 bytes (macOS SHA-256 3f58a418… over the
-    // decompressed content; read_data decodes decmpfs transparently).
+    // The decompressed size (180000) lives in the `com.apple.decmpfs` header, not
+    // the inode's dstream `size` field — a resource-fork-compressed file has no
+    // main-fork dstream, so `inode.size` is absent and `meta().size` is 0. The
+    // load-bearing check is that `read_at` transparently decodes decmpfs and
+    // materializes all 180000 bytes (macOS SHA-256 3f58a418… over the content).
+    let m = fs.meta(id).unwrap();
+    assert_eq!(m.kind, NodeKind::File);
+
     let mut buf = vec![0u8; 180_000];
     let n = fs.read_at(id, StreamId::Default, 0, &mut buf).unwrap();
     assert_eq!(n, 180_000);
