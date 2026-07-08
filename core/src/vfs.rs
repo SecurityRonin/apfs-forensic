@@ -326,3 +326,63 @@ impl<R: Read + Seek + Send> FileSystem for ApfsFs<R> {
         Ok(ExtentStream::empty())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Snapshot-aware mounting over the committed P4 fixture (`apfs_content.bin`,
+    //! ZERO snapshots — a real Apple-minted container). These exercise the
+    //! `vfs`-feature snapshot seam only; the populated (with-snapshots) path is
+    //! validated by the env-gated point-in-time test in `core/tests/snapshot.rs`.
+    use super::*;
+    use std::io::Cursor;
+
+    const CONTENT: &[u8] = include_bytes!("../../tests/data/apfs_content.bin");
+
+    /// The live volume's transaction id — the newest point in the timeline.
+    fn live_xid() -> u64 {
+        ApfsFs::open(Cursor::new(CONTENT))
+            .expect("open live apfs")
+            .root_xid
+    }
+
+    #[test]
+    fn p4_fixture_lists_zero_snapshots() {
+        // The P4 fixture's snap-metadata tree is empty; enumeration returns [].
+        let snaps = ApfsFs::snapshots(Cursor::new(CONTENT)).expect("list snapshots");
+        assert!(
+            snaps.is_empty(),
+            "P4 fixture has no snapshots; got {snaps:?}"
+        );
+    }
+
+    #[test]
+    fn open_snapshot_at_live_xid_reads_plain_txt() {
+        // Mounting at the live volume's own xid is the live state — /plain.txt is
+        // readable, proving open_snapshot wires a mountable FileSystem.
+        let fs = ApfsFs::open_snapshot(Cursor::new(CONTENT), live_xid())
+            .expect("mount live-xid snapshot");
+        let root = fs.root();
+        let found = fs
+            .lookup(root, b"plain.txt")
+            .expect("lookup plain.txt")
+            .expect("plain.txt present at root");
+        let mut buf = [0u8; 64];
+        let n = fs
+            .read_at(found, StreamId::Default, 0, &mut buf)
+            .expect("read plain.txt");
+        assert!(n > 0, "plain.txt should have content");
+    }
+
+    #[test]
+    fn open_snapshot_unknown_xid_fails_loud() {
+        // A xid that is neither the live volume's nor any retained snapshot's is a
+        // loud, named failure carrying the offending value — never a silent mount.
+        let bogus = live_xid().wrapping_add(0xDEAD_BEEF);
+        let err = ApfsFs::open_snapshot(Cursor::new(CONTENT), bogus)
+            .expect_err("unknown snapshot xid must fail loud");
+        assert!(
+            matches!(err, ApfsError::SnapshotNotFound { xid } if xid == bogus),
+            "expected SnapshotNotFound({bogus}); got {err:?}"
+        );
+    }
+}
