@@ -65,6 +65,24 @@ impl<R: Read + Seek> ApfsFs<R> {
     /// bootstrap-class error), the container-open errors of
     /// [`ApfsContainer::open`], or [`ApfsError::Io`] on a read/seek failure.
     pub fn open(reader: R) -> Result<Self> {
+        let (reader, volume, block_size) = Self::open_first_volume(reader)?;
+        let root_xid = volume.xid();
+        Ok(Self {
+            reader: Mutex::new(reader),
+            volume,
+            block_size,
+            root_xid,
+        })
+    }
+
+    /// Open the container, resolve the first volume's live superblock (APSB), and
+    /// return the reader together with the parsed live volume and the container
+    /// block size. Shared bootstrap for [`ApfsFs::open`], [`ApfsFs::open_snapshot`],
+    /// and [`ApfsFs::snapshots`].
+    ///
+    /// # Errors
+    /// As [`ApfsFs::open`].
+    fn open_first_volume(reader: R) -> Result<(R, ApfsVolume, usize)> {
         let mut container = ApfsContainer::open(reader)?;
         let block_size = container.superblock().block_size as usize;
         let addrs = container.volume_superblock_addrs()?;
@@ -80,14 +98,57 @@ impl<R: Read + Seek> ApfsFs<R> {
         let mut buf = vec![0u8; block_size];
         reader.read_exact(&mut buf)?;
         let volume = ApfsVolume::parse(&buf)?;
-        let root_xid = volume.xid();
+        Ok((reader, volume, block_size))
+    }
 
+    /// Open the first volume as it stood at transaction `xid` — the point-in-time
+    /// view for the `[H]` state-history cohort.
+    ///
+    /// The live volume *is* the state at its own xid (the newest point in the
+    /// timeline), so `xid == live.xid()` mounts the live volume directly. Any
+    /// earlier `xid` must name a retained snapshot: its frozen APSB is read via
+    /// [`crate::snapshot::mount_snapshot`] (which grafts the live omap so the
+    /// existing navigation reads the volume exactly as it stood at snapshot time).
+    /// Every subsequent read reflects the snapshot, not the live volume.
+    ///
+    /// # Errors
+    /// [`ApfsError::SnapshotNotFound`] if `xid` names neither the live volume nor
+    /// a retained snapshot; otherwise the errors of [`ApfsFs::open`],
+    /// [`crate::snapshot::list_snapshots`], and [`crate::snapshot::mount_snapshot`].
+    pub fn open_snapshot(reader: R, xid: u64) -> Result<Self> {
+        let (mut reader, live, block_size) = Self::open_first_volume(reader)?;
+        if xid == live.xid() {
+            return Ok(Self {
+                reader: Mutex::new(reader),
+                volume: live,
+                block_size,
+                root_xid: xid,
+            });
+        }
+        let snaps = crate::snapshot::list_snapshots(&mut reader, &live, block_size)?;
+        let snapshot = snaps
+            .iter()
+            .find(|s| s.xid == xid)
+            .ok_or(ApfsError::SnapshotNotFound { xid })?;
+        let volume = crate::snapshot::mount_snapshot(&mut reader, &live, snapshot, block_size)?;
         Ok(Self {
             reader: Mutex::new(reader),
             volume,
             block_size,
-            root_xid,
+            root_xid: xid,
         })
+    }
+
+    /// Enumerate the first volume's snapshots (sorted by xid), so a caller can list
+    /// the temporal cohort without re-implementing the container/volume open.
+    /// Returns an empty vector for an unsnapshotted volume.
+    ///
+    /// # Errors
+    /// The bootstrap errors of [`ApfsFs::open`] and the tree-walk errors of
+    /// [`crate::snapshot::list_snapshots`].
+    pub fn snapshots(reader: R) -> Result<Vec<crate::snapshot::Snapshot>> {
+        let (mut reader, volume, block_size) = Self::open_first_volume(reader)?;
+        crate::snapshot::list_snapshots(&mut reader, &volume, block_size)
     }
 }
 
@@ -378,11 +439,10 @@ mod tests {
         // A xid that is neither the live volume's nor any retained snapshot's is a
         // loud, named failure carrying the offending value — never a silent mount.
         let bogus = live_xid().wrapping_add(0xDEAD_BEEF);
-        let err = ApfsFs::open_snapshot(Cursor::new(CONTENT), bogus)
-            .expect_err("unknown snapshot xid must fail loud");
-        assert!(
-            matches!(err, ApfsError::SnapshotNotFound { xid } if xid == bogus),
-            "expected SnapshotNotFound({bogus}); got {err:?}"
-        );
+        match ApfsFs::open_snapshot(Cursor::new(CONTENT), bogus) {
+            Err(ApfsError::SnapshotNotFound { xid }) => assert_eq!(xid, bogus),
+            Err(other) => panic!("expected SnapshotNotFound({bogus}); got {other:?}"),
+            Ok(_) => panic!("expected SnapshotNotFound({bogus}); got a mounted fs"),
+        }
     }
 }

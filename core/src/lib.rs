@@ -122,6 +122,11 @@ pub enum ApfsError {
     /// implemented — fail loud rather than mis-read a tree oid as a base address.
     #[error("checkpoint {area} area is tree-backed; B-tree resolution not yet implemented")]
     CheckpointTreeUnsupported { area: &'static str },
+    /// A snapshot mount was requested for a transaction id that names neither the
+    /// live volume nor any retained snapshot — fail loud with the offending xid
+    /// rather than silently mounting the wrong (or live) state.
+    #[error("no snapshot with transaction id {xid} (and it is not the live volume's xid)")]
+    SnapshotNotFound { xid: u64 },
     /// A transparently-compressed file's `com.apple.decmpfs` payload could not be
     /// decoded — a named codec/format failure (unknown/unsupported compression
     /// type, malformed header, codec rejection, or a length mismatch). The reader
