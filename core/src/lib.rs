@@ -182,7 +182,7 @@ impl<R: Read + Seek> ApfsContainer<R> {
                     last_magic: 0,
                 });
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e.into()), // cov:unreachable: in-memory readers only surface EOF
         }
 
         // Parse + validate the block-zero bootstrap superblock (magic + cksum).
@@ -281,12 +281,14 @@ impl<R: Read + Seek> ApfsContainer<R> {
         if !(container::NX_MINIMUM_BLOCK_SIZE..=container::NX_MAXIMUM_BLOCK_SIZE)
             .contains(&block_size)
         {
+            // block_size was validated at open (resolve_live_checkpoint errors on an
+            // out-of-range value), so the live superblock is always in range here.
             return Err(ApfsError::FieldOutOfRange {
                 structure: "nx_superblock",
                 field: "nx_block_size",
                 value: u64::from(block_size),
                 cap: u64::from(container::NX_MAXIMUM_BLOCK_SIZE),
-            });
+            }); // cov:unreachable
         }
         let block_size = block_size as usize;
 

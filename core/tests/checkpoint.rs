@@ -90,3 +90,45 @@ fn tree_backed_descriptor_area_is_rejected_loudly() {
     let mut reader = Cursor::new(HEAD);
     assert!(resolve_live_checkpoint(&mut reader, &bootstrap).is_err());
 }
+
+#[test]
+fn descriptor_blocks_past_the_image_end_are_skipped_not_fatal() {
+    // Point the descriptor ring at blocks beyond the reader's end: each read hits
+    // EOF, which read_block turns into a per-slot miss (skip), so the walk finds
+    // no valid NXSB and fails loud with NoValidSuperblock — never an Io panic.
+    let mut blk = block0().to_vec();
+    // desc_base @112 -> block 10_000 (far past this ~17-block head), 2 slots.
+    blk[104..108].copy_from_slice(&2u32.to_le_bytes());
+    blk[112..120].copy_from_slice(&10_000u64.to_le_bytes());
+    let cks = apfs_core::object::fletcher64_checksum(&blk);
+    blk[0..8].copy_from_slice(&cks.to_le_bytes());
+    let bootstrap = NxSuperblock::parse(&blk).expect("mutated bootstrap parses");
+
+    let mut reader = Cursor::new(HEAD);
+    assert!(matches!(
+        resolve_live_checkpoint(&mut reader, &bootstrap),
+        Err(ApfsError::NoValidSuperblock { .. })
+    ));
+}
+
+#[test]
+fn out_of_range_block_size_is_rejected_loudly() {
+    // A corrupt nx_block_size outside the spec range (4096..=65536) would drive
+    // every checkpoint seek to the wrong place; resolution must reject it loud
+    // with the offending value, never trust it.
+    let mut blk = block0().to_vec();
+    blk[36..40].copy_from_slice(&131_072u32.to_le_bytes()); // nx_block_size (2x max)
+    let cks = apfs_core::object::fletcher64_checksum(&blk);
+    blk[0..8].copy_from_slice(&cks.to_le_bytes());
+    let bootstrap = NxSuperblock::parse(&blk).expect("mutated bootstrap parses");
+    assert_eq!(bootstrap.block_size, 131_072);
+
+    let mut reader = Cursor::new(HEAD);
+    match resolve_live_checkpoint(&mut reader, &bootstrap) {
+        Err(ApfsError::FieldOutOfRange { field, value, .. }) => {
+            assert_eq!(field, "nx_block_size");
+            assert_eq!(value, 131_072);
+        }
+        other => panic!("expected FieldOutOfRange(nx_block_size), got {other:?}"),
+    }
+}

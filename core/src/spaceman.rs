@@ -227,8 +227,7 @@ mod tests {
         let mut r = Cursor::new(img);
         let got = is_block_free(&mut r, 0, 999, BS);
         let Err(crate::ApfsError::FieldOutOfRange { field, value, .. }) = got else {
-            unreachable!("out-of-range block must be FieldOutOfRange, got {got:?}")
-            // cov:unreachable
+            unreachable!("block OOR ⇒ FieldOutOfRange: {got:?}") // cov:unreachable
         };
         assert_eq!(field, "block");
         assert_eq!(value, 999);
@@ -240,8 +239,7 @@ mod tests {
         let mut r = Cursor::new(img);
         let got = is_block_free(&mut r, 0, 0, BS);
         let Err(crate::ApfsError::UnsupportedSpacemanCab { count }) = got else {
-            unreachable!("CAB tier must be UnsupportedSpacemanCab, got {got:?}")
-            // cov:unreachable
+            unreachable!("CAB tier ⇒ UnsupportedSpacemanCab: {got:?}") // cov:unreachable
         };
         assert_eq!(count, 3);
     }
@@ -253,8 +251,7 @@ mod tests {
         let mut r = Cursor::new(img);
         let got = is_block_free(&mut r, 0, 64, BS);
         let Err(crate::ApfsError::FieldOutOfRange { field, .. }) = got else {
-            unreachable!("bad chunk_index must be FieldOutOfRange, got {got:?}")
-            // cov:unreachable
+            unreachable!("chunk_index OOR ⇒ FieldOutOfRange: {got:?}") // cov:unreachable
         };
         assert_eq!(field, "chunk_index");
     }
@@ -304,8 +301,7 @@ mod tests {
         let mut r = Cursor::new(img);
         let got = is_block_free(&mut r, 0, 0, BS);
         let Err(crate::ApfsError::FieldOutOfRange { field, .. }) = got else {
-            unreachable!("bad chunk_info_index must be FieldOutOfRange, got {got:?}")
-            // cov:unreachable
+            unreachable!("chunk_info_index OOR ⇒ FieldOutOfRange: {got:?}") // cov:unreachable
         };
         assert_eq!(field, "chunk_info_index");
     }

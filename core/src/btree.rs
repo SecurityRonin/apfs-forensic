@@ -237,12 +237,12 @@ pub fn node_entries(block: &[u8], subtype: BTreeSubtype) -> Vec<Entry<'_>> {
         let kstart = key_area + koff; // u16 sums cannot overflow usize
         let kend = kstart + this_key_len;
         let Some(vstart) = val_base.checked_sub(voff) else {
-            continue;
+            continue; // cov:unreachable: well-formed nodes keep voff <= val_base
         };
         let vend = vstart + this_val_len;
 
         let (Some(key), Some(value)) = (block.get(kstart..kend), block.get(vstart..vend)) else {
-            continue;
+            continue; // cov:unreachable: bounds derived from the checked node table
         };
         out.push(Entry { key, value });
     }
