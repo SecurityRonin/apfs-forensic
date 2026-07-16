@@ -174,8 +174,9 @@ fn decode_resource_fork(
 /// and crafted input alike — kept as defense-in-depth against a future variant.
 #[inline]
 fn unreachable_algorithm() -> crate::Result<Vec<u8>> {
-    Err(ApfsError::Decmpfs("decmpfs unsupported algorithm")) // cov:unreachable: LzBitmap rejected pre-dispatch, all other variants routed
-}
+    // cov:unreachable: LzBitmap rejected pre-dispatch, all other variants routed
+    Err(ApfsError::Decmpfs("decmpfs unsupported algorithm")) // cov:unreachable
+} // cov:unreachable
 
 /// Zlib resource fork (type 4): classic Resource-Manager header + block table.
 fn decode_zlib_resource_fork(fork: &[u8], uncompressed_size: usize) -> crate::Result<Vec<u8>> {

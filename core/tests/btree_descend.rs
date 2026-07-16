@@ -9,6 +9,7 @@ use std::io::Cursor;
 
 use apfs_core::btree::{self, BTreeSubtype};
 use apfs_core::object::fletcher64_checksum;
+use apfs_core::omap::ObjectMap;
 use apfs_core::ApfsError;
 
 const CHAIN: &[u8] = include_bytes!("../../tests/data/apfs_container_chain.bin");
@@ -199,6 +200,87 @@ fn descend_guards_against_self_cycle() {
         0,
         BLOCK_SIZE,
         BTreeSubtype::Omap,
+        &mut |_, _| {},
+    ) {
+        Err(ApfsError::CycleGuard { .. }) => {}
+        other => panic!("expected CycleGuard, got {other:?}"),
+    }
+}
+
+/// `ObjectMap::resolve` over a MULTI-LEVEL omap tree: build an `omap_phys`
+/// header (block 0) whose `om_tree_oid` points at a ROOT index node (block 1)
+/// over two leaves (blocks 2/3). resolve must run its `(ok_oid, ok_xid)` comparator
+/// to descend to the right leaf and its value-visitor to pick the floor entry —
+/// the closures that a single-leaf committed fixture never exercises.
+#[test]
+fn object_map_resolve_descends_a_multilevel_tree() {
+    let mut img = vec![0u8; BLOCK_SIZE * 4];
+
+    // block 0: omap_phys header — o_type OMAP (0xb) @24, om_tree_oid = 1 @48.
+    {
+        let om = &mut img[0..BLOCK_SIZE];
+        om[24..28].copy_from_slice(&0xbu32.to_le_bytes());
+        om[48..56].copy_from_slice(&1u64.to_le_bytes());
+        let cks = fletcher64_checksum(om);
+        om[0..8].copy_from_slice(&cks.to_le_bytes());
+    }
+    // block 2/3: leaves; block 1: ROOT index over them (blocks 2 and 3).
+    let leaf_lo = fixed_node(LEAF | FIXED, 0, &[(omap_key(10, 5), omap_leaf_val(111))]);
+    let leaf_hi = fixed_node(LEAF | FIXED, 0, &[(omap_key(20, 5), omap_leaf_val(222))]);
+    let root = fixed_node(
+        ROOT | FIXED,
+        1,
+        &[
+            (omap_key(10, 5), 2u64.to_le_bytes().to_vec()),
+            (omap_key(20, 5), 3u64.to_le_bytes().to_vec()),
+        ],
+    );
+    img[BLOCK_SIZE..2 * BLOCK_SIZE].copy_from_slice(&root);
+    img[2 * BLOCK_SIZE..3 * BLOCK_SIZE].copy_from_slice(&leaf_lo);
+    img[3 * BLOCK_SIZE..4 * BLOCK_SIZE].copy_from_slice(&leaf_hi);
+
+    let omap = ObjectMap::parse(&img[0..BLOCK_SIZE]).expect("parse omap_phys");
+    let mut reader = Cursor::new(img);
+    // Resolving oid 20 at xid 5 must descend to the high leaf → paddr 222.
+    let entry = omap
+        .resolve(&mut reader, 20, 5, BLOCK_SIZE)
+        .expect("resolve");
+    assert_eq!(entry.paddr, 222);
+    assert_eq!((entry.oid, entry.xid), (20, 5));
+
+    // An oid absent from the tree is a loud OmapUnresolved, never a wrong paddr.
+    match omap.resolve(&mut reader, 99, 5, BLOCK_SIZE) {
+        Err(ApfsError::OmapUnresolved { oid, .. }) => assert_eq!(oid, 99),
+        other => panic!("expected OmapUnresolved(99); got {other:?}"),
+    }
+}
+
+/// An index node at block 0 whose only child branch points back at itself, so
+/// `find_leaf`'s keyed descent (a separate function from `for_each_leaf_entry`)
+/// must also fire its own visited-set `CycleGuard` rather than loop forever.
+#[test]
+fn find_leaf_guards_against_self_cycle() {
+    let mut img = vec![0u8; BLOCK_SIZE * 2];
+    let node = &mut img[0..BLOCK_SIZE];
+    node[32..34].copy_from_slice(&(0x1u16 | 0x4u16).to_le_bytes()); // ROOT | FIXED
+    node[34..36].copy_from_slice(&1u16.to_le_bytes()); // btn_level 1 (index)
+    node[36..40].copy_from_slice(&1u32.to_le_bytes()); // btn_nkeys 1
+    node[40..42].copy_from_slice(&0u16.to_le_bytes()); // btn_table_space off
+    node[42..44].copy_from_slice(&4u16.to_le_bytes()); // btn_table_space len
+    node[56..58].copy_from_slice(&0u16.to_le_bytes()); // TOC key_offs
+    node[58..60].copy_from_slice(&8u16.to_le_bytes()); // TOC value_offs
+    let val_base = BLOCK_SIZE - 40;
+    node[val_base - 8..val_base].copy_from_slice(&0u64.to_le_bytes()); // child = self
+    let cks = fletcher64_checksum(node);
+    node[0..8].copy_from_slice(&cks.to_le_bytes());
+
+    let mut reader = Cursor::new(img);
+    match btree::find_leaf(
+        &mut reader,
+        0,
+        BLOCK_SIZE,
+        BTreeSubtype::Omap,
+        |_| std::cmp::Ordering::Equal,
         &mut |_, _| {},
     ) {
         Err(ApfsError::CycleGuard { .. }) => {}

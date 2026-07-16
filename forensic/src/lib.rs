@@ -396,11 +396,18 @@ mod observation_tests {
             ),
         ];
         for (k, want) in cases {
+            // Exercise every arm of the inherent code(), the Observation::code()
+            // delegate, and note() (all unconditionally, not only in an assert
+            // message that runs on failure) for each variant.
+            let inherent = AnomalyKind::code(k);
+            let observed = <AnomalyKind as Observation>::code(k);
+            assert_eq!(inherent, observed, "inherent/Observation code must agree");
+            assert!(inherent.starts_with("APFS-"), "code is scheme-prefixed");
+            assert!(!k.note().is_empty(), "{inherent} must carry a note");
             assert_eq!(
                 k.severity(),
                 Some(*want),
-                "{} should grade {want:?}",
-                AnomalyKind::code(k)
+                "{inherent} should grade {want:?}"
             );
         }
     }

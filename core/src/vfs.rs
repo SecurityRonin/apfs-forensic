@@ -439,11 +439,14 @@ mod tests {
         // A xid that is neither the live volume's nor any retained snapshot's is a
         // loud, named failure carrying the offending value — never a silent mount.
         let bogus = live_xid().wrapping_add(0xDEAD_BEEF);
-        match ApfsFs::open_snapshot(Cursor::new(CONTENT), bogus) {
-            Err(ApfsError::SnapshotNotFound { xid }) => assert_eq!(xid, bogus),
-            Err(other) => panic!("expected SnapshotNotFound({bogus}); got {other:?}"),
-            Ok(_) => panic!("expected SnapshotNotFound({bogus}); got a mounted fs"),
-        }
+        // map to the error (ApfsFs is not Debug, so don't format the Ok value).
+        let err = ApfsFs::open_snapshot(Cursor::new(CONTENT), bogus)
+            .err()
+            .expect("a bogus xid must fail, not mount");
+        let ApfsError::SnapshotNotFound { xid } = err else {
+            unreachable!("bogus xid must be SnapshotNotFound, got {err:?}") // cov:unreachable
+        };
+        assert_eq!(xid, bogus);
     }
 
     #[test]
@@ -469,13 +472,11 @@ mod tests {
         // Only APFS oids address this filesystem; any other identity domain is a
         // loud Unsupported error carrying the offending scheme, never a silent 0.
         let err = oid_of(FileId::Opaque(7)).expect_err("non-APFS id must be rejected");
-        match err {
-            VfsError::Unsupported { layer, scheme } => {
-                assert_eq!(layer, "apfs file-id");
-                assert!(scheme.contains("Opaque"), "scheme should name the variant");
-            }
-            other => panic!("expected Unsupported; got {other:?}"),
-        }
+        let VfsError::Unsupported { layer, scheme } = err else {
+            unreachable!("oid_of(Opaque) must be Unsupported, got {err:?}") // cov:unreachable
+        };
+        assert_eq!(layer, "apfs file-id");
+        assert!(scheme.contains("Opaque"), "scheme should name the variant");
         // The APFS variant is accepted and yields its oid.
         assert_eq!(
             oid_of(FileId::ApfsOid { oid: 42, xid: 9 }).expect("apfs id accepted"),
@@ -488,41 +489,39 @@ mod tests {
         require_default_stream(StreamId::Default).expect("default stream is accepted");
         let err = require_default_stream(StreamId::Named(3))
             .expect_err("a named stream must be refused loud");
-        match err {
-            VfsError::Unsupported { layer, scheme } => {
-                assert_eq!(layer, "apfs stream");
-                assert!(scheme.contains("Named"), "scheme should name the variant");
-            }
-            other => panic!("expected Unsupported; got {other:?}"),
-        }
+        let VfsError::Unsupported { layer, scheme } = err else {
+            unreachable!("Named stream must be Unsupported, got {err:?}") // cov:unreachable
+        };
+        assert_eq!(layer, "apfs stream");
+        assert!(scheme.contains("Named"), "scheme should name the variant");
     }
 
     #[test]
     fn map_err_keeps_io_distinct_from_decode() {
         // An I/O error maps to VfsError::Io carrying the source.
         let io = ApfsError::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
-        match map_err(io) {
-            VfsError::Io { op, .. } => assert_eq!(op, "apfs read"),
-            other => panic!("expected Io; got {other:?}"),
-        }
+        let mapped = map_err(io);
+        let VfsError::Io { op, .. } = mapped else {
+            unreachable!("Io maps to VfsError::Io, got {mapped:?}") // cov:unreachable
+        };
+        assert_eq!(op, "apfs read");
         // A structural decode failure maps to VfsError::Decode carrying the detail.
-        let decode = ApfsError::SnapshotNotFound { xid: 5 };
-        match map_err(decode) {
-            VfsError::Decode { layer, detail, .. } => {
-                assert_eq!(layer, "apfs");
-                assert!(detail.contains('5'), "detail should carry the message");
-            }
-            other => panic!("expected Decode; got {other:?}"),
-        }
+        let mapped = map_err(ApfsError::SnapshotNotFound { xid: 5 });
+        let VfsError::Decode { layer, detail, .. } = mapped else {
+            unreachable!("non-Io maps to VfsError::Decode, got {mapped:?}") // cov:unreachable
+        };
+        assert_eq!(layer, "apfs");
+        assert!(detail.contains('5'), "detail should carry the message");
     }
 
     #[test]
     fn poisoned_lock_is_a_named_bootstrap_failure() {
         // A poisoned interior lock surfaces as a loud, named Bootstrap error —
         // never an unwrap/panic (Paranoid Gatekeeper).
-        match poisoned() {
-            VfsError::Bootstrap { stage, .. } => assert_eq!(stage, "apfs reader lock"),
-            other => panic!("expected Bootstrap; got {other:?}"),
-        }
+        let err = poisoned();
+        let VfsError::Bootstrap { stage, .. } = err else {
+            unreachable!("poisoned() is a Bootstrap error, got {err:?}") // cov:unreachable
+        };
+        assert_eq!(stage, "apfs reader lock");
     }
 }

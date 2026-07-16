@@ -180,11 +180,11 @@ mod tests {
         }];
 
         let mut r = Cursor::new(img);
-        match pending_objects(&mut r, reaper_b as u64, &mappings, BS) {
-            // cap is the fn-local MAX_REAP_LISTS (4096).
-            Err(crate::ApfsError::CycleGuard { cap }) => assert_eq!(cap, 4096),
-            other => panic!("expected CycleGuard; got {other:?}"),
-        }
+        let got = pending_objects(&mut r, reaper_b as u64, &mappings, BS);
+        let Err(crate::ApfsError::CycleGuard { cap }) = got else {
+            unreachable!("a self-cycle must be CycleGuard, got {got:?}") // cov:unreachable
+        };
+        assert_eq!(cap, 4096); // fn-local MAX_REAP_LISTS
     }
 
     // An in-progress object (nr_oid != 0) is reported even with no reap lists.

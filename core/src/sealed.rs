@@ -118,12 +118,11 @@ mod tests {
     fn rejects_a_block_too_short_for_the_structure() {
         // A block shorter than INTEGRITY_META_MIN_LEN is a loud FieldOutOfRange
         // carrying the offending length — never a panic on the field reads.
-        match IntegrityMeta::parse(&[0u8; 16]) {
-            Err(crate::ApfsError::FieldOutOfRange { field, value, .. }) => {
-                assert_eq!(field, "block.len");
-                assert_eq!(value, 16);
-            }
-            other => panic!("expected FieldOutOfRange(block.len); got {other:?}"),
-        }
+        let got = IntegrityMeta::parse(&[0u8; 16]);
+        let Err(crate::ApfsError::FieldOutOfRange { field, value, .. }) = got else {
+            unreachable!("a short block must be FieldOutOfRange, got {got:?}") // cov:unreachable
+        };
+        assert_eq!(field, "block.len");
+        assert_eq!(value, 16);
     }
 }
