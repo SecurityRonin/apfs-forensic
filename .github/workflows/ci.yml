@@ -6,13 +6,6 @@ on:
   pull_request:
     branches: [main]
 
-# NOTE (scaffold phase): the fleet `coverage` (100% line) and `fuzz` (smoke)
-# gates are intentionally NOT in this workflow yet — `apfs-core`/`apfs-forensic`
-# are todo!() skeletons, so there are no lines to cover and fuzzing a stub just
-# panics. They are reinstated when phase-1 implementation lands (see
-# docs/plans/2026-06-21-apfs-forensic-design.md §6). The scheduled fuzz.yml
-# already carries the real APFS targets for when there is code to fuzz.
-
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -37,7 +30,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@9bdad043e88c75890e36ad3bbc8d27f0090dd609 # v2.7.8
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     name: Test (${{ matrix.os }})
@@ -49,7 +42,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@9bdad043e88c75890e36ad3bbc8d27f0090dd609 # v2.7.8
-      - run: cargo test
+      - run: cargo test --workspace --all-features
 
   msrv:
     name: MSRV (1.85)
@@ -69,6 +62,56 @@ jobs:
         with:
           command: check
 
+  coverage:
+    name: Coverage (100% lines)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@9bdad043e88c75890e36ad3bbc8d27f0090dd609 # v2.7.8
+      - uses: taiki-e/install-action@59012be0884e296ca2da49b530610e72c49039ad # v2.81.6
+        with:
+          tool: cargo-llvm-cov
+      # `--all-features` is REQUIRED: the forensic-vfs adapter (`impl FileSystem
+      # for ApfsFs`) lives behind the optional `vfs` feature, so without it the
+      # adapter is silently unmeasured. The library's reads are generic over the
+      # reader, so each error closure is monomorphized per reader type — making
+      # cargo-llvm-cov's region/function metrics structurally < 100%. The
+      # meaningful, monomorphization-robust invariant is that every executable
+      # source line is hit at least once across the merged run.
+      #
+      # Exception — panic-free defence in depth: a line carrying a
+      # `// cov:unreachable` marker is a defensive guard (a bounds-checked
+      # `.get()` fallback, an error arm dominated by an earlier validation, etc.)
+      # provably unreachable under a dominating invariant, kept deliberately to
+      # stay panic-free if that invariant is ever broken by a future change. Such
+      # lines cannot be exercised by any test and are exempt. The gate fails on
+      # any OTHER zero-hit line.
+      - name: Generate lcov (workspace, all features)
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+      - name: Enforce line coverage (unreachable defensive arms must carry // cov:unreachable)
+        shell: bash
+        run: |
+          fail=0
+          while IFS= read -r line; do
+            if [[ "$line" == SF:* ]]; then
+              f="${line#SF:}"
+            elif [[ "$line" =~ ^DA:([0-9]+),0$ ]]; then
+              n="${BASH_REMATCH[1]}"
+              src="$(sed -n "${n}p" "$f")"
+              if [[ "$src" == *cov:unreachable* ]]; then
+                echo "exempt (// cov:unreachable): $f:$n"
+              else
+                echo "::error::Uncovered line $f:$n:$src"
+                fail=1
+              fi
+            fi
+          done < lcov.info
+          if [[ "$fail" -ne 0 ]]; then exit 1; fi
+          echo "All executable lines covered, or annotated // cov:unreachable."
+
   docs:
     name: Docs
     runs-on: ubuntu-latest
@@ -76,4 +119,4 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@9bdad043e88c75890e36ad3bbc8d27f0090dd609 # v2.7.8
-      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features

@@ -17,7 +17,7 @@ use crate::AnomalyKind;
 /// refcount > 1 is shared by more than one file (`APFS-CLONE-SHARED-EXTENT`), and
 /// an inode with `INODE_WAS_CLONED` set but no shared extent is an inconsistency
 /// (`APFS-CLONE-FLAG-WITHOUT-SHARING`). The grading/emission logic lives in
-/// [`clone_anomalies`] and is unit-tested; the extent-reference-tree reader that
+/// `clone_anomalies` and is unit-tested; the extent-reference-tree reader that
 /// would feed it real refcounts is a core capability not yet built (and no
 /// committed corpus contains clones to validate it), so this currently surfaces
 /// no clone findings rather than guess. It is wired through once that reader and
