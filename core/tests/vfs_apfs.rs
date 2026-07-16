@@ -23,7 +23,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use apfs_core::vfs::ApfsFs;
-use forensic_vfs::{FileId, FileSystem, FsKind, NodeKind, StreamId, TimeZonePolicy};
+use forensic_vfs::{FileId, FileSystem, FsKind, NodeKind, SectorSizes, StreamId, TimeZonePolicy};
 
 /// The committed real macOS-authored APFS carve (repo-root `tests/data/`, two
 /// levels up from `core/tests/`). About 1.7 MB — safe to `include_bytes!`.
@@ -148,6 +148,90 @@ fn nested_path_resolves_beth_via_dir1() {
     let mut buf = [0u8; 64];
     let n = fs.read_at(beth, StreamId::Default, 0, &mut buf).unwrap();
     assert_eq!(&buf[..n], b"Beth target content for symlink.\n");
+}
+
+#[test]
+fn sector_sizes_report_the_container_block_size() {
+    let fs = open();
+    // The fixture is a 4 KiB-block APFS container; logical == physical == block.
+    let SectorSizes {
+        logical,
+        physical,
+        cluster_or_block,
+    } = fs.sector_sizes();
+    assert_eq!(logical, 4096);
+    assert_eq!(physical, 4096);
+    assert_eq!(cluster_or_block, 4096);
+}
+
+#[test]
+fn extents_enumerate_plain_file_runs() {
+    let fs = open();
+    // plain.txt (inode 18) is a small resident-in-one-extent regular file: its
+    // extent stream yields at least one run with a non-zero length.
+    let runs: Vec<_> = fs
+        .extents(oid(&*fs, 18), StreamId::Default)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(!runs.is_empty(), "plain.txt must have >=1 extent run");
+    assert!(
+        runs.iter().any(|r| r.run.len > 0),
+        "at least one run has a non-zero byte length"
+    );
+
+    // A named stream is refused loud, never silently read as the default fork.
+    assert!(fs.extents(oid(&*fs, 18), StreamId::Named(1)).is_err());
+}
+
+#[test]
+fn meta_classifies_dir_and_symlink_kinds() {
+    let fs = open();
+    // Dir1 is a directory → mode_to_kind S_IFDIR.
+    let dir1 = fs.lookup(fs.root(), b"Dir1").unwrap().expect("Dir1");
+    assert_eq!(fs.meta(dir1).unwrap().kind, NodeKind::Dir);
+
+    // symlink_to_beth is a symlink → mode_to_kind S_IFLNK.
+    let link = fs
+        .lookup(fs.root(), b"symlink_to_beth")
+        .unwrap()
+        .expect("symlink_to_beth");
+    assert_eq!(fs.meta(link).unwrap().kind, NodeKind::Symlink);
+}
+
+#[test]
+fn read_link_returns_empty_and_deleted_unallocated_are_empty_streams() {
+    let fs = open();
+    let link = fs
+        .lookup(fs.root(), b"symlink_to_beth")
+        .unwrap()
+        .expect("symlink_to_beth");
+    // Symlink-target resolution via the embedded xattr is a follow-up; the
+    // default surface is an empty target, not a bootstrap failure.
+    assert!(fs.read_link(link, 4096).unwrap().is_empty());
+
+    // Deleted-record carving and free-space enumeration are follow-ups: their
+    // default surfaces are empty streams (not errors).
+    assert_eq!(fs.deleted().unwrap().count(), 0);
+    assert_eq!(fs.unallocated().unwrap().count(), 0);
+}
+
+#[test]
+fn lookup_of_non_utf8_name_matches_nothing() {
+    let fs = open();
+    // APFS names are UTF-8; a non-UTF-8 query cannot name any on-disk entry, so
+    // the adapter returns None rather than erroring.
+    let invalid = [0xFF, 0xFE, 0x00];
+    assert_eq!(fs.lookup(fs.root(), &invalid).unwrap(), None);
+}
+
+#[test]
+fn read_at_rejects_a_named_stream() {
+    let fs = open();
+    let mut buf = [0u8; 8];
+    assert!(fs
+        .read_at(oid(&*fs, 18), StreamId::Named(2), 0, &mut buf)
+        .is_err());
 }
 
 #[test]
