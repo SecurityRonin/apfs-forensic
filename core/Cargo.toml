@@ -1,6 +1,6 @@
 [package]
 name = "apfs-core"
-version = "0.2.0"
+version = "0.2.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -33,7 +33,7 @@ lzvn = { workspace = true }
 # Optional so a bare reader stays dependency-light; the `vfs` feature turns on
 # the `impl FileSystem for ApfsFs` adapter so an APFS volume composes as
 # `Arc<dyn FileSystem>` (mirrors ntfs-core's `vfs` feature).
-forensic-vfs = { version = "0.1", optional = true }
+forensic-vfs = { version = "0.2", optional = true }
 
 [features]
 # Adapt `ApfsFs` to the forensic-vfs `FileSystem` trait (see `src/vfs.rs`).

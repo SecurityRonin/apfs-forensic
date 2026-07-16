@@ -21,7 +21,7 @@ readme = "README.md"
 [workspace.dependencies]
 # Reader crate published as `apfs-core` with `[lib] name = "apfs_core"` so the
 # import path does not collide with the unrelated third-party `apfs` crate.
-apfs-core = { path = "core", version = "0.2.0", package = "apfs-core" }
+apfs-core = { path = "core", version = "0.2.1", package = "apfs-core" }
 # KNOWLEDGE layer: magics, type codes, decmpfs map, and the shared report model.
 forensicnomicon = "1"
 thiserror = "2"
