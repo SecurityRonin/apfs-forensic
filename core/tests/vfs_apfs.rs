@@ -45,7 +45,7 @@ fn oid(fs: &dyn FileSystem, n: u64) -> FileId {
 #[test]
 fn identity_is_apfs_and_root_is_inode_2() {
     let fs = open();
-    assert_eq!(fs.kind(), FsKind::Apfs);
+    assert_eq!(fs.kind(), FsKind::APFS);
     assert_eq!(fs.timestamp_zone(), TimeZonePolicy::Utc);
     match fs.root() {
         FileId::ApfsOid { oid, .. } => assert_eq!(oid, 2, "APFS root is ROOT_DIR_INO_NUM"),

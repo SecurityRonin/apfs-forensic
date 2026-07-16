@@ -252,7 +252,7 @@ fn build_meta(inode: &Inode) -> FsMeta {
 
 impl<R: Read + Seek + Send> FileSystem for ApfsFs<R> {
     fn kind(&self) -> FsKind {
-        FsKind::Apfs
+        FsKind::APFS
     }
 
     fn root(&self) -> FileId {
