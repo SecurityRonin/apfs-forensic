@@ -151,6 +151,29 @@ mod tests {
     }
 
     #[test]
+    fn from_u16_maps_every_known_tag() {
+        // Each documented KB_TAG_* value decodes to its named variant; a wrapping
+        // key, unlock records, or user payload all round-trip through from_u16.
+        assert_eq!(KeybagTag::from_u16(0x01), KeybagTag::WrappingKey);
+        assert_eq!(KeybagTag::from_u16(0x02), KeybagTag::VolumeKey);
+        assert_eq!(KeybagTag::from_u16(0x03), KeybagTag::VolumeUnlockRecords);
+        assert_eq!(KeybagTag::from_u16(0x04), KeybagTag::VolumePassphraseHint);
+        assert_eq!(KeybagTag::from_u16(0xf8), KeybagTag::UserPayload);
+        assert_eq!(KeybagTag::from_u16(0x99), KeybagTag::Unknown);
+    }
+
+    #[test]
+    fn wrapping_key_and_unlock_records_are_encrypted() {
+        // A volume keybag with a wrapping key (0x01) and unlock records (0x03) is
+        // encrypted, and both named tags are surfaced.
+        let kb = keybag(&[(0x01, 32), (0x03, 16)]);
+        let st = read_keybag(&kb).expect("parse keybag");
+        assert!(st.encrypted, "wrapping-key / unlock-records ⇒ encrypted");
+        assert!(st.tags_present.contains(&KeybagTag::WrappingKey));
+        assert!(st.tags_present.contains(&KeybagTag::VolumeUnlockRecords));
+    }
+
+    #[test]
     fn empty_keybag_reports_not_encrypted() {
         let kb = keybag(&[]);
         let st = read_keybag(&kb).expect("parse empty keybag");
@@ -167,5 +190,17 @@ mod tests {
         let st = read_keybag(&kb).expect("parse keybag");
         assert!(st.tags_present.contains(&KeybagTag::Unknown));
         assert_eq!(st.unknown_tags, vec![(0x55u16, 16u64)]);
+    }
+
+    #[test]
+    fn header_claiming_more_entries_than_the_blob_stops_early() {
+        // kl_nkeys says 4 entries but the blob is only the 16-byte header + 8
+        // bytes: the walk must break at the first entry that would over-read,
+        // never panic or over-read (bounds-safe against a lying count).
+        let mut data = vec![0u8; 24];
+        data[0..2].copy_from_slice(&1u16.to_le_bytes()); // kl_version
+        data[2..4].copy_from_slice(&4u16.to_le_bytes()); // kl_nkeys (lies)
+        let st = read_keybag(&data).expect("parse truncated keybag");
+        assert!(st.tags_present.is_empty(), "no entry fits → nothing parsed");
     }
 }

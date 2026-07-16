@@ -113,4 +113,17 @@ mod tests {
         block[100] ^= 0xff;
         assert!(IntegrityMeta::parse(&block).is_err());
     }
+
+    #[test]
+    fn rejects_a_block_too_short_for_the_structure() {
+        // A block shorter than INTEGRITY_META_MIN_LEN is a loud FieldOutOfRange
+        // carrying the offending length — never a panic on the field reads.
+        match IntegrityMeta::parse(&[0u8; 16]) {
+            Err(crate::ApfsError::FieldOutOfRange { field, value, .. }) => {
+                assert_eq!(field, "block.len");
+                assert_eq!(value, 16);
+            }
+            other => panic!("expected FieldOutOfRange(block.len); got {other:?}"),
+        }
+    }
 }

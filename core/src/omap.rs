@@ -59,6 +59,17 @@ pub struct OmapEntry {
     pub flags: u32,
 }
 
+/// Build the `omap_phys` [`crate::ApfsError::UnexpectedObjectType`] error,
+/// carrying the offending raw `o_type` (`found`) — shared by the short-block and
+/// wrong-type guards so the error shape lives in one place.
+fn unexpected_omap_type(found: u32) -> crate::ApfsError {
+    crate::ApfsError::UnexpectedObjectType {
+        structure: "omap_phys",
+        expected: u32::from(OBJECT_TYPE_OMAP),
+        found,
+    }
+}
+
 /// An object map header (`omap_phys_t`): the entry point into a volume/container
 /// object map's backing B-tree.
 #[derive(Debug, Clone, Copy)]
@@ -83,26 +94,16 @@ impl ObjectMap {
     /// [`crate::ApfsError::ChecksumMismatch`] for a Fletcher-64 failure.
     pub fn parse(block: &[u8]) -> crate::Result<Self> {
         if block.len() < OMAP_PHYS_MIN_LEN {
-            return Err(crate::ApfsError::UnexpectedObjectType {
-                structure: "omap_phys",
-                expected: u32::from(OBJECT_TYPE_OMAP),
-                found: 0,
-            });
+            return Err(unexpected_omap_type(0));
         }
         // Type gate: the block must be an OMAP object.
         let Some(hdr) = ObjPhys::parse(block) else {
-            return Err(crate::ApfsError::UnexpectedObjectType {
-                structure: "omap_phys",
-                expected: u32::from(OBJECT_TYPE_OMAP),
-                found: 0,
-            }); // cov:unreachable: len checked >= OMAP_PHYS_MIN_LEN > OBJ_PHYS_LEN
+            // cov:unreachable: len checked >= OMAP_PHYS_MIN_LEN > OBJ_PHYS_LEN, so
+            // ObjPhys::parse (which only returns None on len < OBJ_PHYS_LEN) is Some.
+            return Err(unexpected_omap_type(0)); // cov:unreachable
         };
         if hdr.obj_type() != OBJECT_TYPE_OMAP {
-            return Err(crate::ApfsError::UnexpectedObjectType {
-                structure: "omap_phys",
-                expected: u32::from(OBJECT_TYPE_OMAP),
-                found: hdr.obj_type_raw,
-            });
+            return Err(unexpected_omap_type(hdr.obj_type_raw));
         }
         // Checksum gate before trusting the tree oids.
         let stored = fletcher64_stored(block);

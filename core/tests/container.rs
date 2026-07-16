@@ -51,8 +51,10 @@ fn parse_decodes_checkpoint_area_fields() {
     assert_eq!(nx.xp_desc_blocks, 8);
     assert_eq!(nx.xp_data_base, 9);
     assert_eq!(nx.xp_data_blocks, 304);
-    // The descriptor area is contiguous for a freshly minted container.
+    // Both checkpoint areas are contiguous (not tree-backed) for a freshly
+    // minted container — the high bit of each block count is clear.
     assert!(!nx.xp_desc_is_tree());
+    assert!(!nx.xp_data_is_tree());
 }
 
 #[test]

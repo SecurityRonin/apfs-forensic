@@ -155,6 +155,38 @@ mod tests {
         assert_eq!(got, vec![(500, 0x4000_000d), (600, 0x4000_0002)]);
     }
 
+    // A reap-list whose nrl_next points back to itself is a cyclic graph: the
+    // seen-set guard must fail loud with CycleGuard, never loop forever.
+    #[test]
+    fn cyclic_reap_list_chain_is_caught() {
+        let mut img = vec![0u8; BS * 3];
+        let reaper_b = 1usize;
+        let list_b = 2usize;
+        let list_oid = 0x4001u64;
+
+        put_u64(&mut img, reaper_b, 48, list_oid); // nr_head → the list
+        stamp(&mut img, reaper_b);
+
+        // The reap list points its nrl_next back at its own ephemeral oid → cycle.
+        put_u64(&mut img, list_b, 32, list_oid); // nrl_next == self
+        put_u32(&mut img, list_b, 48, 0); // nrl_count == 0
+        stamp(&mut img, list_b);
+
+        let mappings = [CheckpointMapping {
+            oid: list_oid,
+            paddr: list_b as u64,
+            obj_type: 0x8000_0012,
+            subtype: 0,
+        }];
+
+        let mut r = Cursor::new(img);
+        match pending_objects(&mut r, reaper_b as u64, &mappings, BS) {
+            // cap is the fn-local MAX_REAP_LISTS (4096).
+            Err(crate::ApfsError::CycleGuard { cap }) => assert_eq!(cap, 4096),
+            other => panic!("expected CycleGuard; got {other:?}"),
+        }
+    }
+
     // An in-progress object (nr_oid != 0) is reported even with no reap lists.
     #[test]
     fn reports_in_progress_object() {

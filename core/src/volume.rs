@@ -58,6 +58,17 @@ const VOLNAME_LEN: usize = 256;
 /// Minimum readable APSB length: header through the volume name field.
 const APSB_MIN_LEN: usize = OFF_VOLNAME + VOLNAME_LEN;
 
+/// Build the `apfs_superblock` [`crate::ApfsError::UnexpectedObjectType`] error
+/// (`expected`/`found` are the offending values) — shared by the short-block,
+/// wrong-type, and wrong-magic guards so the error shape lives in one place.
+fn apsb_bad_type(expected: u32, found: u32) -> crate::ApfsError {
+    crate::ApfsError::UnexpectedObjectType {
+        structure: "apfs_superblock",
+        expected,
+        found,
+    }
+}
+
 /// A parsed volume superblock (subset; `#[non_exhaustive]` for additive growth).
 ///
 /// The fs-tree navigation entry points ([`Self::root_tree_oid`] /
@@ -92,36 +103,22 @@ impl ApfsVolume {
     /// value); [`crate::ApfsError::ChecksumMismatch`] on a Fletcher-64 failure.
     pub fn parse(block: &[u8]) -> crate::Result<Self> {
         if block.len() < APSB_MIN_LEN {
-            return Err(crate::ApfsError::UnexpectedObjectType {
-                structure: "apfs_superblock",
-                expected: APFS_MAGIC,
-                found: 0,
-            });
+            return Err(apsb_bad_type(APFS_MAGIC, 0));
         }
         // Object-type gate: the block must be an FS (volume superblock) object.
         let Some(hdr) = ObjPhys::parse(block) else {
-            return Err(crate::ApfsError::UnexpectedObjectType {
-                structure: "apfs_superblock",
-                expected: APFS_MAGIC,
-                found: 0,
-            }); // cov:unreachable: len checked >= APSB_MIN_LEN > OBJ_PHYS_LEN
+            // cov:unreachable: len checked >= APSB_MIN_LEN > OBJ_PHYS_LEN, so
+            // ObjPhys::parse (None only on len < OBJ_PHYS_LEN) is always Some.
+            return Err(apsb_bad_type(APFS_MAGIC, 0)); // cov:unreachable
         };
         if hdr.obj_type() != OBJECT_TYPE_FS {
-            return Err(crate::ApfsError::UnexpectedObjectType {
-                structure: "apfs_superblock",
-                expected: u32::from(OBJECT_TYPE_FS),
-                found: hdr.obj_type_raw,
-            });
+            return Err(apsb_bad_type(u32::from(OBJECT_TYPE_FS), hdr.obj_type_raw));
         }
 
         // Signature gate: apfs_magic == "APSB".
         let magic = crate::bytes::le_u32(block, OFF_MAGIC);
         if magic != APFS_MAGIC {
-            return Err(crate::ApfsError::UnexpectedObjectType {
-                structure: "apfs_superblock",
-                expected: APFS_MAGIC,
-                found: magic,
-            });
+            return Err(apsb_bad_type(APFS_MAGIC, magic));
         }
 
         // Checksum gate before trusting the tree oids.

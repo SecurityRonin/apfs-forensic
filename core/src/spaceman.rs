@@ -150,3 +150,159 @@ pub fn is_block_free<R: Read + Seek>(
         .is_some_and(|byte| byte & (1u8 << (bit % 8)) != 0);
     Ok(!allocated)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    const BS: usize = 4096;
+
+    /// Build a checksum-valid `spaceman_phys` block at block 0 of a synthetic
+    /// image, with the main-device geometry fields set. `cab_count` selects the
+    /// (unsupported) CAB tier; `addr_offset` positions the inline CIB address
+    /// array; `cib0` is the paddr written at CIB slot 0.
+    #[allow(clippy::too_many_arguments)]
+    fn spaceman_image(
+        blocks_per_chunk: u32,
+        chunks_per_cib: u32,
+        block_count: u64,
+        chunk_count: u64,
+        cib_count: u32,
+        cab_count: u32,
+        addr_offset: u32,
+        cib0: u64,
+    ) -> Vec<u8> {
+        // A 4-block image: [0]=spaceman, and room for cib/bitmap at 1..4.
+        let mut img = vec![0u8; BS * 4];
+        let sm = &mut img[0..BS];
+        sm[24..28].copy_from_slice(&5u32.to_le_bytes()); // o_type = SPACEMAN (informational)
+        sm[SM_BLOCKS_PER_CHUNK..SM_BLOCKS_PER_CHUNK + 4]
+            .copy_from_slice(&blocks_per_chunk.to_le_bytes());
+        sm[SM_CHUNKS_PER_CIB..SM_CHUNKS_PER_CIB + 4].copy_from_slice(&chunks_per_cib.to_le_bytes());
+        let d = SM_DEV0;
+        sm[d + DEV_BLOCK_COUNT..d + DEV_BLOCK_COUNT + 8]
+            .copy_from_slice(&block_count.to_le_bytes());
+        sm[d + DEV_CHUNK_COUNT..d + DEV_CHUNK_COUNT + 8]
+            .copy_from_slice(&chunk_count.to_le_bytes());
+        sm[d + DEV_CIB_COUNT..d + DEV_CIB_COUNT + 4].copy_from_slice(&cib_count.to_le_bytes());
+        sm[d + DEV_CAB_COUNT..d + DEV_CAB_COUNT + 4].copy_from_slice(&cab_count.to_le_bytes());
+        sm[d + DEV_ADDR_OFFSET..d + DEV_ADDR_OFFSET + 4]
+            .copy_from_slice(&addr_offset.to_le_bytes());
+        let ao = addr_offset as usize;
+        sm[ao..ao + 8].copy_from_slice(&cib0.to_le_bytes());
+        // Fletcher-64 over the spaceman block (stored in bytes 0..8).
+        let cks = crate::object::fletcher64_checksum(&img[0..BS]);
+        img[0..8].copy_from_slice(&cks.to_le_bytes());
+        img
+    }
+
+    #[test]
+    fn read_obj_block_rejects_a_bad_checksum() {
+        // An all-zero block has a zero stored checksum but a non-zero computed one
+        // (the header oid bytes differ) → ChecksumMismatch, never trusted.
+        let mut img = vec![0u8; BS];
+        img[8..16].copy_from_slice(&0x1234u64.to_le_bytes()); // perturb → cksum != 0
+        let mut r = Cursor::new(img);
+        match read_obj_block(&mut r, 0, BS) {
+            Err(crate::ApfsError::ChecksumMismatch { block, .. }) => assert_eq!(block, 0x1234),
+            other => panic!("expected ChecksumMismatch; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zero_geometry_is_out_of_range() {
+        let img = spaceman_image(0, 0, 100, 10, 1, 0, 256, 0);
+        let mut r = Cursor::new(img);
+        assert!(matches!(
+            is_block_free(&mut r, 0, 0, BS),
+            Err(crate::ApfsError::FieldOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn block_past_device_is_out_of_range() {
+        let img = spaceman_image(8, 4, 100, 10, 1, 0, 256, 0);
+        let mut r = Cursor::new(img);
+        match is_block_free(&mut r, 0, 999, BS) {
+            Err(crate::ApfsError::FieldOutOfRange { field, value, .. }) => {
+                assert_eq!(field, "block");
+                assert_eq!(value, 999);
+            }
+            other => panic!("expected FieldOutOfRange(block); got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cab_tier_is_unsupported_and_loud() {
+        let img = spaceman_image(8, 4, 100, 10, 1, 3, 256, 0);
+        let mut r = Cursor::new(img);
+        match is_block_free(&mut r, 0, 0, BS) {
+            Err(crate::ApfsError::UnsupportedSpacemanCab { count }) => assert_eq!(count, 3),
+            other => panic!("expected UnsupportedSpacemanCab; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chunk_index_past_chunk_count_is_out_of_range() {
+        // block 64 with blocks_per_chunk 8 → chunk 8, but chunk_count is 2.
+        let img = spaceman_image(8, 4, 1000, 2, 1, 0, 256, 0);
+        let mut r = Cursor::new(img);
+        match is_block_free(&mut r, 0, 64, BS) {
+            Err(crate::ApfsError::FieldOutOfRange { field, .. }) => {
+                assert_eq!(field, "chunk_index");
+            }
+            other => panic!("expected FieldOutOfRange(chunk_index); got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cib_index_past_cib_count_is_out_of_range() {
+        // chunk 4 with chunks_per_cib 4 → cib 1, but cib_count is 1 (only cib 0).
+        let img = spaceman_image(8, 4, 1000, 100, 1, 0, 256, 0);
+        let mut r = Cursor::new(img);
+        match is_block_free(&mut r, 0, 32, BS) {
+            Err(crate::ApfsError::FieldOutOfRange { field, .. }) => assert_eq!(field, "cib_index"),
+            other => panic!("expected FieldOutOfRange(cib_index); got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zero_bitmap_addr_means_whole_chunk_free() {
+        // A valid path to a CIB whose chunk_info has ci_bitmap_addr == 0 → free.
+        // Build the CIB at block 1 with one chunk_info (count 1), bitmap_addr 0.
+        let mut img = spaceman_image(8, 4, 1000, 10, 1, 0, 256, 1);
+        {
+            let cib = &mut img[BS..2 * BS];
+            cib[CIB_CHUNK_INFO_COUNT..CIB_CHUNK_INFO_COUNT + 4]
+                .copy_from_slice(&1u32.to_le_bytes());
+            // ci_bitmap_addr @ CIB_CHUNK_INFO + 24 left zero.
+            let cks = crate::object::fletcher64_checksum(cib);
+            cib[0..8].copy_from_slice(&cks.to_le_bytes());
+        }
+        let mut r = Cursor::new(img);
+        assert!(
+            is_block_free(&mut r, 0, 0, BS).expect("is_block_free"),
+            "a zero ci_bitmap_addr marks the whole chunk free"
+        );
+    }
+
+    #[test]
+    fn chunk_info_index_past_count_is_out_of_range() {
+        // A CIB whose chunk_info_count is 0, so within_cib (0) is not < 0.
+        let mut img = spaceman_image(8, 4, 1000, 10, 1, 0, 256, 1);
+        {
+            let cib = &mut img[BS..2 * BS];
+            // CIB_CHUNK_INFO_COUNT left 0.
+            let cks = crate::object::fletcher64_checksum(cib);
+            cib[0..8].copy_from_slice(&cks.to_le_bytes());
+        }
+        let mut r = Cursor::new(img);
+        match is_block_free(&mut r, 0, 0, BS) {
+            Err(crate::ApfsError::FieldOutOfRange { field, .. }) => {
+                assert_eq!(field, "chunk_info_index");
+            }
+            other => panic!("expected FieldOutOfRange(chunk_info_index); got {other:?}"),
+        }
+    }
+}
