@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "apfs-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "bitflags",
  "chrono",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "apfs-forensic"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "apfs-core",
  "chrono",
