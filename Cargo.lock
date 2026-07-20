@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "apfs-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bitflags",
  "chrono",
@@ -159,9 +159,9 @@ dependencies = [
 
 [[package]]
 name = "forensic-vfs"
-version = "0.5.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "238d800beff9e362651569fd50591508ab04aa68321e4a3132625150b126ae8d"
+checksum = "285cbb38f775a1c3c476e7e20bffea29eea6a62f73e0721957c04cb3867d1fa6"
 dependencies = [
  "forensicnomicon-core",
  "state-history-forensic",
@@ -389,9 +389,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.0"
+version = "3.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2fac314a64dc9a36e61a9eb4261a5e9bbfbc922b27e518af97bc32b926cf967"
+checksum = "a207d6d6a2b7fc470b80443726053f18a2481b7e1eee970597051596567987a3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -415,7 +415,7 @@ checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.0",
+ "syn 3.0.2",
 ]
 
 [[package]]
