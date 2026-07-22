@@ -10,7 +10,7 @@
 //! deleted-extent carve-candidate reasoning (a free bitmap is necessary but
 //! **not** sufficient for recoverability; see the analyzer).
 
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 
 use crate::bytes::{le_u32, le_u64};
 
@@ -149,6 +149,148 @@ pub fn is_block_free<R: Read + Seek>(
         .get(bit / 8)
         .is_some_and(|byte| byte & (1u8 << (bit % 8)) != 0);
     Ok(!allocated)
+}
+
+/// Return maximal runs of the **free** bit value within a single chunk's
+/// allocation bitmap as `(first_bit, run_len)` pairs (ascending).
+///
+/// `blocks` caps the number of valid bits — the bitmap block is block-sized
+/// (one bit per block) so padding past `blocks` is ignored. `free_bit_is_one`
+/// selects the polarity: APFS marks a **set** bit *allocated* and a **clear**
+/// bit *free*, so the space-manager traversal passes `false`; the parameter
+/// keeps the core reusable for the inverse (NTFS/ext4-style) convention. A byte
+/// past the end of `bitmap` is treated as fully **allocated**, so free space
+/// that cannot be read is never fabricated. Pure and panic-free.
+#[must_use]
+pub fn free_runs(bitmap: &[u8], blocks: u64, free_bit_is_one: bool) -> Vec<(u64, u64)> {
+    // A missing byte reads as "all allocated": 0x00 when a set bit means free,
+    // 0xFF when a clear bit means free (APFS).
+    let allocated_fill: u8 = if free_bit_is_one { 0x00 } else { 0xFF };
+    let mut runs = Vec::new();
+    let mut start: Option<u64> = None;
+    for i in 0..blocks {
+        let byte = bitmap
+            .get((i / 8) as usize)
+            .copied()
+            .unwrap_or(allocated_fill);
+        let bit_set = byte & (1u8 << (i % 8) as u32) != 0;
+        let is_free = bit_set == free_bit_is_one;
+        match (is_free, start) {
+            (true, None) => start = Some(i),
+            (false, Some(s)) => {
+                runs.push((s, i - s));
+                start = None;
+            }
+            (true, Some(_)) | (false, None) => {}
+        }
+    }
+    if let Some(s) = start {
+        runs.push((s, blocks.saturating_sub(s)));
+    }
+    runs
+}
+
+/// Append a free run, coalescing with the previous run when physically
+/// contiguous so the enumeration stays maximal across chunk boundaries.
+fn push_free_run(runs: &mut Vec<(u64, u64)>, first: u64, len: u64) {
+    if len == 0 {
+        return; // cov:unreachable: free_runs and whole-chunk pushes are always len>=1
+    }
+    if let Some(last) = runs.last_mut() {
+        if last.0.saturating_add(last.1) == first {
+            last.1 = last.1.saturating_add(len);
+            return;
+        }
+    }
+    runs.push((first, len));
+}
+
+/// Enumerate every currently-free physical block on the main device as maximal
+/// `(first_block, block_count)` runs — ascending and merged across chunk
+/// boundaries.
+///
+/// Walks the main device's inline chunk-info (CIB) address array; for each
+/// chunk it reads the `SPACEMAN_BITMAP` (or treats a `ci_bitmap_addr` of 0 as a
+/// wholly-free chunk) and collects the blocks whose bit is **clear** (APFS marks
+/// a set bit *allocated*). The spaceman and CIB blocks are checksum-verified
+/// before trust; the bitmap block is raw (no `obj_phys` header). The last chunk
+/// is clamped to `sm_dev.block_count`, so trailing padding bits never appear as
+/// free. This is the inverse predicate of [`is_block_free`], across the whole
+/// device in one pass.
+///
+/// `spaceman_paddr` is the live space manager's physical block (resolve it from
+/// the container's checkpoint map via [`crate::ApfsContainer::spaceman_paddr`]).
+///
+/// # Errors
+/// [`crate::ApfsError::UnsupportedSpacemanCab`] for the multi-TB CAB tier
+/// (`sm_cab_count > 0`), not yet implemented; [`crate::ApfsError::FieldOutOfRange`]
+/// on inconsistent geometry; [`crate::ApfsError::ChecksumMismatch`] on a bad
+/// spaceman/CIB checksum; [`crate::ApfsError::Io`] on a read/seek failure.
+pub fn free_block_runs<R: Read + Seek>(
+    reader: &mut R,
+    spaceman_paddr: u64,
+    block_size: usize,
+) -> crate::Result<Vec<(u64, u64)>> {
+    let sm = read_obj_block(reader, spaceman_paddr, block_size)?;
+
+    let blocks_per_chunk = u64::from(le_u32(&sm, SM_BLOCKS_PER_CHUNK));
+    let chunks_per_cib = u64::from(le_u32(&sm, SM_CHUNKS_PER_CIB));
+    let block_count = le_u64(&sm, SM_DEV0 + DEV_BLOCK_COUNT);
+    let chunk_count = le_u64(&sm, SM_DEV0 + DEV_CHUNK_COUNT);
+    let cib_count = u64::from(le_u32(&sm, SM_DEV0 + DEV_CIB_COUNT));
+    let cab_count = u64::from(le_u32(&sm, SM_DEV0 + DEV_CAB_COUNT));
+    let addr_offset = le_u32(&sm, SM_DEV0 + DEV_ADDR_OFFSET) as usize;
+
+    let range = |field, value, cap| crate::ApfsError::FieldOutOfRange {
+        structure: "spaceman_phys",
+        field,
+        value,
+        cap,
+    };
+    if blocks_per_chunk == 0 || chunks_per_cib == 0 {
+        return Err(range("sm_blocks_per_chunk/sm_chunks_per_cib", 0, 1));
+    }
+    // The CAB indirection tier is multi-TB-container only and not yet
+    // implemented — fail loud rather than mis-resolve a chunk.
+    if cab_count != 0 {
+        return Err(crate::ApfsError::UnsupportedSpacemanCab { count: cab_count });
+    }
+
+    let mut runs: Vec<(u64, u64)> = Vec::new();
+    for cib_idx in 0..cib_count {
+        let cib_paddr = le_u64(&sm, addr_offset + cib_idx as usize * 8);
+        let cib = read_obj_block(reader, cib_paddr, block_size)?;
+        let ci_count = le_u32(&cib, CIB_CHUNK_INFO_COUNT) as usize;
+
+        for within in 0..ci_count {
+            let chunk_index = cib_idx.saturating_mul(chunks_per_cib) + within as u64;
+            if chunk_index >= chunk_count {
+                break;
+            }
+            let chunk_base = chunk_index.saturating_mul(blocks_per_chunk);
+            if chunk_base >= block_count {
+                break;
+            }
+            let blocks_in_chunk = blocks_per_chunk.min(block_count - chunk_base);
+            let ci_off = CIB_CHUNK_INFO + within * CHUNK_INFO_LEN;
+            let bitmap_addr = le_u64(&cib, ci_off + CI_BITMAP_ADDR);
+
+            // A zero bitmap address means the whole chunk is free.
+            if bitmap_addr == 0 {
+                push_free_run(&mut runs, chunk_base, blocks_in_chunk);
+                continue;
+            }
+
+            let mut bitmap = vec![0u8; block_size];
+            let offset = bitmap_addr.saturating_mul(block_size as u64);
+            reader.seek(SeekFrom::Start(offset))?;
+            reader.read_exact(&mut bitmap)?;
+            for (start, len) in free_runs(&bitmap, blocks_in_chunk, false) {
+                push_free_run(&mut runs, chunk_base + start, len);
+            }
+        }
+    }
+    Ok(runs)
 }
 
 #[cfg(test)]
@@ -357,8 +499,8 @@ mod tests {
 
     /// Build a 4-block image (0=spaceman, 1=CIB, 2=bitmap, 3=spare) with two
     /// chunks in one CIB: chunk 0 uses the bitmap at block 2, chunk 1 is
-    /// wholly-free (`ci_bitmap_addr == 0`). Geometry: blocks_per_chunk=8,
-    /// chunks_per_cib=4, block_count=16, chunk_count=2.
+    /// wholly-free (`ci_bitmap_addr == 0`). Geometry: `blocks_per_chunk=8`,
+    /// `chunks_per_cib=4`, `block_count=16`, `chunk_count=2`.
     fn two_chunk_image(chunk0_bitmap_byte: u8) -> Vec<u8> {
         let mut img = spaceman_image(8, 4, 16, 2, 1, 0, 256, 1);
         {
@@ -415,5 +557,42 @@ mod tests {
             free_block_runs(&mut r, 0, BS),
             Err(crate::ApfsError::FieldOutOfRange { .. })
         ));
+    }
+
+    /// A one-chunk image (`block_count=8`, `chunk_count=1`) whose CIB claims
+    /// `chunk_info_count` chunk-infos, chunk 0's bitmap wholly free at block 2.
+    fn overcounted_cib_image(block_count: u64, chunk_count: u64, chunk_info_count: u32) -> Vec<u8> {
+        let mut img = spaceman_image(8, 4, block_count, chunk_count, 1, 0, 256, 1);
+        {
+            let cib = &mut img[BS..2 * BS];
+            cib[CIB_CHUNK_INFO_COUNT..CIB_CHUNK_INFO_COUNT + 4]
+                .copy_from_slice(&chunk_info_count.to_le_bytes());
+            let ci0 = CIB_CHUNK_INFO + CI_BITMAP_ADDR;
+            cib[ci0..ci0 + 8].copy_from_slice(&2u64.to_le_bytes());
+            let cks = crate::object::fletcher64_checksum(cib);
+            cib[0..8].copy_from_slice(&cks.to_le_bytes());
+        }
+        img[2 * BS] = 0x00; // chunk 0 all free
+        img
+    }
+
+    #[test]
+    fn free_block_runs_stops_when_cib_overcounts_chunks() {
+        // Adversarial: the CIB claims 2 chunk-infos but the device has 1 chunk.
+        // The within=1 iteration's chunk_index (1) reaches chunk_count (1) and
+        // the walk stops — only chunk 0's free blocks are reported.
+        let mut r = Cursor::new(overcounted_cib_image(8, 1, 2));
+        let runs = free_block_runs(&mut r, 0, BS).expect("free_block_runs");
+        assert_eq!(runs, vec![(0, 8)]);
+    }
+
+    #[test]
+    fn free_block_runs_stops_when_chunk_base_exceeds_block_count() {
+        // Adversarial: chunk_count claims 2 but block_count is one chunk (8).
+        // Chunk 1 would begin at block 8 == block_count, so the walk stops before
+        // it — chunk 0's free blocks are still reported.
+        let mut r = Cursor::new(overcounted_cib_image(8, 2, 2));
+        let runs = free_block_runs(&mut r, 0, BS).expect("free_block_runs");
+        assert_eq!(runs, vec![(0, 8)]);
     }
 }

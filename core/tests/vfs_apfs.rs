@@ -200,7 +200,7 @@ fn meta_classifies_dir_and_symlink_kinds() {
 }
 
 #[test]
-fn read_link_returns_empty_and_deleted_unallocated_are_empty_streams() {
+fn read_link_returns_empty_and_deleted_is_an_empty_stream() {
     let fs = open();
     let link = fs
         .lookup(fs.root(), b"symlink_to_beth")
@@ -210,10 +210,29 @@ fn read_link_returns_empty_and_deleted_unallocated_are_empty_streams() {
     // default surface is an empty target, not a bootstrap failure.
     assert!(fs.read_link(link, 4096).unwrap().is_empty());
 
-    // Deleted-record carving and free-space enumeration are follow-ups: their
-    // default surfaces are empty streams (not errors).
+    // Deleted-record carving is a follow-up: its default surface is an empty
+    // stream (not an error).
     assert_eq!(fs.deleted().unwrap().count(), 0);
-    assert_eq!(fs.unallocated().unwrap().count(), 0);
+}
+
+#[test]
+fn unallocated_enumerates_container_free_space() {
+    // Free space is read from the container space manager's allocation bitmaps.
+    // A real APFS container always has free blocks, so the stream is non-empty
+    // and every run is block-aligned within the image (the old empty stub is gone).
+    let fs = open();
+    let bs = u64::from(fs.sector_sizes().cluster_or_block);
+    let runs: Vec<_> = fs
+        .unallocated()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all runs decode");
+    assert!(!runs.is_empty(), "container has free space");
+    for r in &runs {
+        assert_eq!(r.run.image_offset % bs, 0, "runs are block-aligned");
+        assert_eq!(r.run.len % bs, 0, "run lengths are whole blocks");
+        assert!(r.run.len > 0, "no zero-length runs");
+    }
 }
 
 #[test]

@@ -52,6 +52,11 @@ pub struct ApfsFs<R: Read + Seek> {
     /// The mounted volume's transaction id, stamped into every [`FileId`] so a
     /// reused oid at a different xid is never confused with this snapshot.
     root_xid: u64,
+    /// Physical block of the live space manager (`nx_spaceman_oid` resolved
+    /// through the checkpoint map), captured at open before the container is
+    /// consumed. `None` if the oid did not resolve — [`FileSystem::unallocated`]
+    /// then fails loud rather than reporting no free space.
+    spaceman_paddr: Option<u64>,
 }
 
 impl<R: Read + Seek> ApfsFs<R> {
@@ -65,13 +70,14 @@ impl<R: Read + Seek> ApfsFs<R> {
     /// bootstrap-class error), the container-open errors of
     /// [`ApfsContainer::open`], or [`ApfsError::Io`] on a read/seek failure.
     pub fn open(reader: R) -> Result<Self> {
-        let (reader, volume, block_size) = Self::open_first_volume(reader)?;
+        let (reader, volume, block_size, spaceman_paddr) = Self::open_first_volume(reader)?;
         let root_xid = volume.xid();
         Ok(Self {
             reader: Mutex::new(reader),
             volume,
             block_size,
             root_xid,
+            spaceman_paddr,
         })
     }
 
@@ -82,7 +88,7 @@ impl<R: Read + Seek> ApfsFs<R> {
     ///
     /// # Errors
     /// As [`ApfsFs::open`].
-    fn open_first_volume(reader: R) -> Result<(R, ApfsVolume, usize)> {
+    fn open_first_volume(reader: R) -> Result<(R, ApfsVolume, usize, Option<u64>)> {
         let mut container = ApfsContainer::open(reader)?;
         let block_size = container.superblock().block_size as usize;
         let addrs = container.volume_superblock_addrs()?;
@@ -91,6 +97,9 @@ impl<R: Read + Seek> ApfsFs<R> {
             checked: 0,
             last_magic: 0,
         })?;
+        // Capture the live space-manager block before consuming the container;
+        // it drives free-space enumeration in `unallocated`.
+        let spaceman_paddr = container.spaceman_paddr();
 
         let mut reader = container.into_reader();
         let offset = vaddr.saturating_mul(block_size as u64);
@@ -98,7 +107,7 @@ impl<R: Read + Seek> ApfsFs<R> {
         let mut buf = vec![0u8; block_size];
         reader.read_exact(&mut buf)?;
         let volume = ApfsVolume::parse(&buf)?;
-        Ok((reader, volume, block_size))
+        Ok((reader, volume, block_size, spaceman_paddr))
     }
 
     /// Open the first volume as it stood at transaction `xid` — the point-in-time
@@ -116,13 +125,14 @@ impl<R: Read + Seek> ApfsFs<R> {
     /// a retained snapshot; otherwise the errors of [`ApfsFs::open`],
     /// [`crate::snapshot::list_snapshots`], and [`crate::snapshot::mount_snapshot`].
     pub fn open_snapshot(reader: R, xid: u64) -> Result<Self> {
-        let (mut reader, live, block_size) = Self::open_first_volume(reader)?;
+        let (mut reader, live, block_size, spaceman_paddr) = Self::open_first_volume(reader)?;
         if xid == live.xid() {
             return Ok(Self {
                 reader: Mutex::new(reader),
                 volume: live,
                 block_size,
                 root_xid: xid,
+                spaceman_paddr,
             });
         }
         let snaps = crate::snapshot::list_snapshots(&mut reader, &live, block_size)?;
@@ -136,6 +146,7 @@ impl<R: Read + Seek> ApfsFs<R> {
             volume,
             block_size,
             root_xid: xid,
+            spaceman_paddr,
         })
     }
 
@@ -147,7 +158,7 @@ impl<R: Read + Seek> ApfsFs<R> {
     /// The bootstrap errors of [`ApfsFs::open`] and the tree-walk errors of
     /// [`crate::snapshot::list_snapshots`].
     pub fn snapshots(reader: R) -> Result<Vec<crate::snapshot::Snapshot>> {
-        let (mut reader, volume, block_size) = Self::open_first_volume(reader)?;
+        let (mut reader, volume, block_size, _spaceman_paddr) = Self::open_first_volume(reader)?;
         crate::snapshot::list_snapshots(&mut reader, &volume, block_size)
     }
 }
@@ -200,6 +211,23 @@ fn poisoned() -> VfsError {
         stage: "apfs reader lock",
         detail: "interior reader mutex poisoned".to_string(),
     }
+}
+
+/// Map absolute free-block runs `(first_block, block_count)` to unallocated
+/// [`RunInfo`] extents in the image's byte address space. `block_size` converts
+/// block units to bytes; every run carries [`RunAlloc::Unallocated`]. Pure and
+/// panic-free (saturating arithmetic), so it is unit-testable without a reader.
+fn unallocated_runs(runs: &[(u64, u64)], block_size: u64) -> Vec<RunInfo> {
+    runs.iter()
+        .map(|&(first_block, blocks)| RunInfo {
+            run: ByteRun {
+                image_offset: first_block.saturating_mul(block_size),
+                len: blocks.saturating_mul(block_size),
+                flags: RunFlags::default(),
+            },
+            alloc: RunAlloc::Unallocated,
+        })
+        .collect()
 }
 
 /// Map a `j_drec_val_t.flags` DT_ type to a [`NodeKind`].
@@ -384,7 +412,24 @@ impl<R: Read + Seek + Send> FileSystem for ApfsFs<R> {
     }
 
     fn unallocated(&self) -> VfsResult<ExtentStream> {
-        Ok(ExtentStream::empty())
+        // Free space is tracked by the container space manager. A container whose
+        // `nx_spaceman_oid` never resolved through the checkpoint map is a
+        // bootstrap failure — we cannot honestly say "no free space" — so it is
+        // surfaced loud, never as a silent empty stream.
+        let sm_paddr = self.spaceman_paddr.ok_or_else(|| VfsError::Bootstrap {
+            stage: "apfs spaceman",
+            detail: "nx_spaceman_oid did not resolve through the checkpoint map".to_string(),
+        })?;
+        let bs = self.block_size;
+        let runs = {
+            let mut guard = self.reader.lock().map_err(|_| poisoned())?;
+            crate::spaceman::free_block_runs(&mut *guard, sm_paddr, bs).map_err(map_err)?
+        };
+        let extents: Vec<VfsResult<RunInfo>> = unallocated_runs(&runs, bs as u64)
+            .into_iter()
+            .map(Ok)
+            .collect();
+        Ok(ExtentStream::new(extents.into_iter()))
     }
 }
 
