@@ -524,4 +524,51 @@ mod tests {
         };
         assert_eq!(stage, "apfs reader lock");
     }
+
+    #[test]
+    fn unallocated_runs_maps_free_blocks_to_byte_extents() {
+        // (first_block, block_count) runs → byte-addressed unallocated extents.
+        // block_size 4096: (3,3) → offset 12288 len 12288; (8,8) → 32768 / 32768.
+        let runs = unallocated_runs(&[(3, 3), (8, 8)], 4096);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].run.image_offset, 3 * 4096);
+        assert_eq!(runs[0].run.len, 3 * 4096);
+        assert_eq!(runs[0].alloc, RunAlloc::Unallocated);
+        assert_eq!(runs[1].run.image_offset, 8 * 4096);
+        assert_eq!(runs[1].run.len, 8 * 4096);
+        assert_eq!(runs[1].alloc, RunAlloc::Unallocated);
+    }
+
+    #[test]
+    fn unallocated_runs_empty_input_yields_no_extents() {
+        assert!(unallocated_runs(&[], 4096).is_empty());
+    }
+
+    #[test]
+    fn unallocated_enumerates_free_space_over_p4_fixture() {
+        // The real P4 container has free blocks; unallocated() must surface them
+        // (not the old empty stub). Every run is Unallocated and block-aligned,
+        // and offsets stay within the image.
+        let fs = ApfsFs::open(Cursor::new(CONTENT)).expect("open live apfs");
+        let bs = fs.block_size as u64;
+        let runs: Vec<RunInfo> = fs
+            .unallocated()
+            .expect("unallocated stream")
+            .collect::<VfsResult<Vec<_>>>()
+            .expect("all runs decode");
+        assert!(
+            !runs.is_empty(),
+            "a real APFS container always has free space"
+        );
+        for r in &runs {
+            assert_eq!(r.alloc, RunAlloc::Unallocated);
+            assert_eq!(r.run.image_offset % bs, 0, "runs are block-aligned");
+            assert_eq!(r.run.len % bs, 0, "run lengths are whole blocks");
+            assert!(r.run.len > 0, "no zero-length runs");
+            assert!(
+                r.run.image_offset < CONTENT.len() as u64,
+                "run offset within image"
+            );
+        }
+    }
 }

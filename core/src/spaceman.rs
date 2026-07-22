@@ -305,4 +305,115 @@ mod tests {
         };
         assert_eq!(field, "chunk_info_index");
     }
+
+    // ---- free_runs (pure bitmap → free-block runs) --------------------------
+
+    #[test]
+    fn free_runs_apfs_polarity_clear_bit_is_free() {
+        // APFS: a SET bit is allocated, a CLEAR bit is free (free_bit_is_one=false).
+        // byte 0x1E = 0b0001_1110: bit0 clear(free), bits1..4 set(alloc),
+        // bits5..7 clear(free) → free runs (0,1) and (5,3).
+        let runs = free_runs(&[0x1E], 8, false);
+        assert_eq!(runs, vec![(0, 1), (5, 3)]);
+    }
+
+    #[test]
+    fn free_runs_inverse_polarity_set_bit_is_free() {
+        // The inverse convention (set bit == free): the same byte flips meaning,
+        // so the free runs are the complement: (1,4).
+        let runs = free_runs(&[0x1E], 8, true);
+        assert_eq!(runs, vec![(1, 4)]);
+    }
+
+    #[test]
+    fn free_runs_honors_blocks_cap_and_ignores_padding() {
+        // Only the first `blocks` bits are valid; padding past it is ignored.
+        // 0xFF (all set = all allocated under APFS polarity) → no free runs even
+        // though later bytes are all-free (0x00) padding.
+        let runs = free_runs(&[0x00, 0x00], 3, false);
+        // First 3 bits of 0x00 are clear → free → one run (0,3), not 16.
+        assert_eq!(runs, vec![(0, 3)]);
+    }
+
+    #[test]
+    fn free_runs_missing_bytes_are_allocated_never_fabricated() {
+        // `blocks` exceeds the supplied bitmap: the missing byte must read as
+        // fully ALLOCATED (never fabricate free space we cannot see). With APFS
+        // polarity the fill is 0xFF, so blocks 8..16 are allocated → no run there.
+        // Bitmap byte 0 = 0x00 → blocks 0..8 free.
+        let runs = free_runs(&[0x00], 16, false);
+        assert_eq!(runs, vec![(0, 8)]);
+        // Inverse polarity: missing byte fills 0x00 (allocated when free==1) → same.
+        let runs = free_runs(&[0xFF], 16, true);
+        assert_eq!(runs, vec![(0, 8)]);
+    }
+
+    #[test]
+    fn free_runs_empty_when_all_allocated() {
+        assert!(free_runs(&[0xFF, 0xFF], 16, false).is_empty());
+    }
+
+    // ---- free_block_runs (full main-device traversal) -----------------------
+
+    /// Build a 4-block image (0=spaceman, 1=CIB, 2=bitmap, 3=spare) with two
+    /// chunks in one CIB: chunk 0 uses the bitmap at block 2, chunk 1 is
+    /// wholly-free (`ci_bitmap_addr == 0`). Geometry: blocks_per_chunk=8,
+    /// chunks_per_cib=4, block_count=16, chunk_count=2.
+    fn two_chunk_image(chunk0_bitmap_byte: u8) -> Vec<u8> {
+        let mut img = spaceman_image(8, 4, 16, 2, 1, 0, 256, 1);
+        {
+            let cib = &mut img[BS..2 * BS];
+            cib[CIB_CHUNK_INFO_COUNT..CIB_CHUNK_INFO_COUNT + 4]
+                .copy_from_slice(&2u32.to_le_bytes());
+            // chunk_info[0].ci_bitmap_addr = block 2.
+            let ci0 = CIB_CHUNK_INFO + CI_BITMAP_ADDR;
+            cib[ci0..ci0 + 8].copy_from_slice(&2u64.to_le_bytes());
+            // chunk_info[1].ci_bitmap_addr = 0 (whole chunk free).
+            let cks = crate::object::fletcher64_checksum(cib);
+            cib[0..8].copy_from_slice(&cks.to_le_bytes());
+        }
+        // Bitmap block (raw, no obj_phys header) for chunk 0.
+        img[2 * BS] = chunk0_bitmap_byte;
+        img
+    }
+
+    #[test]
+    fn free_block_runs_merges_across_chunk_boundary() {
+        // chunk 0 bitmap 0x1E → free blocks (0,1) and (5,3); chunk 1 wholly free
+        // → (8,8). The tail of chunk 0 (5..8) is contiguous with all of chunk 1
+        // (8..16), so they coalesce into (5,11). Result: [(0,1),(5,11)].
+        let mut r = Cursor::new(two_chunk_image(0x1E));
+        let runs = free_block_runs(&mut r, 0, BS).expect("free_block_runs");
+        assert_eq!(runs, vec![(0, 1), (5, 11)]);
+    }
+
+    #[test]
+    fn free_block_runs_all_allocated_chunk0_keeps_chunk1_free() {
+        // chunk 0 fully allocated (0xFF) → no runs there; chunk 1 wholly free.
+        let mut r = Cursor::new(two_chunk_image(0xFF));
+        let runs = free_block_runs(&mut r, 0, BS).expect("free_block_runs");
+        assert_eq!(runs, vec![(8, 8)]);
+    }
+
+    #[test]
+    fn free_block_runs_rejects_cab_tier_loud() {
+        // sm_cab_count > 0 (multi-TB CAB indirection) is unsupported — fail loud.
+        let img = spaceman_image(8, 4, 16, 2, 1, 3, 256, 1);
+        let mut r = Cursor::new(img);
+        let got = free_block_runs(&mut r, 0, BS);
+        let Err(crate::ApfsError::UnsupportedSpacemanCab { count }) = got else {
+            unreachable!("CAB tier ⇒ UnsupportedSpacemanCab: {got:?}") // cov:unreachable
+        };
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn free_block_runs_rejects_zero_geometry_loud() {
+        let img = spaceman_image(0, 0, 16, 2, 1, 0, 256, 1);
+        let mut r = Cursor::new(img);
+        assert!(matches!(
+            free_block_runs(&mut r, 0, BS),
+            Err(crate::ApfsError::FieldOutOfRange { .. })
+        ));
+    }
 }
