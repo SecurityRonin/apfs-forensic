@@ -22,12 +22,24 @@ audit-as-crates-io = false
 [policy.apfs-forensic]
 audit-as-crates-io = false
 
+[[exemptions.aes]]
+version = "0.7.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.aes-kw]]
+version = "0.2.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.autocfg]]
 version = "1.5.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.bitflags]]
 version = "2.13.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.block-buffer]]
+version = "0.10.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.cc]]
@@ -44,7 +56,7 @@ criteria = "safe-to-deploy"
 
 [[exemptions.cpufeatures]]
 version = "0.2.17"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
 
 [[exemptions.crc32fast]]
 version = "1.5.0"
@@ -52,11 +64,11 @@ criteria = "safe-to-deploy"
 
 [[exemptions.crypto-common]]
 version = "0.1.7"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
 
 [[exemptions.digest]]
 version = "0.10.7"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
 
 [[exemptions.find-msvc-tools]]
 version = "0.1.9"
@@ -78,8 +90,20 @@ criteria = "safe-to-deploy"
 version = "0.3.33"
 criteria = "safe-to-deploy"
 
+[[exemptions.generic-array]]
+version = "0.14.7"
+criteria = "safe-to-deploy"
+
+[[exemptions.hmac]]
+version = "0.11.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.iana-time-zone]]
 version = "0.1.65"
+criteria = "safe-to-deploy"
+
+[[exemptions.inout]]
+version = "0.1.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.js-sys]]
@@ -102,6 +126,10 @@ criteria = "safe-to-deploy"
 version = "1.21.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.pbkdf2]]
+version = "0.12.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.pin-project-lite]]
 version = "0.2.17"
 criteria = "safe-to-deploy"
@@ -110,17 +138,13 @@ criteria = "safe-to-deploy"
 version = "1.0.107"
 criteria = "safe-to-deploy"
 
-[[exemptions.quote]]
-version = "1.0.47"
-criteria = "safe-to-deploy"
-
 [[exemptions.rustversion]]
 version = "1.0.23"
 criteria = "safe-to-deploy"
 
 [[exemptions.sha2]]
 version = "0.10.9"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
 
 [[exemptions.shlex]]
 version = "2.0.1"
@@ -132,6 +156,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.slab]]
 version = "0.4.12"
+criteria = "safe-to-deploy"
+
+[[exemptions.subtle]]
+version = "2.6.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.syn]]
@@ -152,7 +180,7 @@ criteria = "safe-to-deploy"
 
 [[exemptions.typenum]]
 version = "1.20.1"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
 
 [[exemptions.unicode-ident]]
 version = "1.0.24"
@@ -160,7 +188,7 @@ criteria = "safe-to-deploy"
 
 [[exemptions.version_check]]
 version = "0.9.5"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
 
 [[exemptions.wasm-bindgen]]
 version = "0.2.126"
@@ -199,5 +227,9 @@ version = "0.4.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows-strings]]
+version = "0.5.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.xts-mode]]
 version = "0.5.1"
 criteria = "safe-to-deploy"
