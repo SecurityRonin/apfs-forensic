@@ -247,20 +247,48 @@ pub fn parse_wrapped_kek(data: &[u8]) -> crate::Result<WrappedKek> {
 
 /// Unwrap an RFC 3394 AES-KW wrapped key.
 ///
+/// The 8-byte integrity check AES-KW carries is what makes a wrong password
+/// *detectable*: it fails here rather than silently yielding a wrong key that
+/// only shows up later as an unreadable volume.
+///
 /// # Errors
-/// [`crate::ApfsError::FieldOutOfRange`] if the input is not a valid wrapped key
-/// or the integrity check fails (i.e. the KEK is wrong).
-pub fn aes_key_unwrap(_kek: &[u8; 32], _wrapped: &[u8; 40]) -> crate::Result<Vec<u8>> {
-    // RED stub: structurally valid, wrong value, always Ok — so the vector test
-    // fails on its assertion and the wrong-KEK test fails by NOT erroring.
-    Ok(vec![0u8; 32])
+/// [`crate::ApfsError::FieldOutOfRange`] if the integrity check fails — which in
+/// practice means the derived key, and therefore the password, is wrong.
+pub fn aes_key_unwrap(kek: &[u8; 32], wrapped: &[u8; 40]) -> crate::Result<Vec<u8>> {
+    use aes_kw::KekAes256;
+    let kek = KekAes256::from(*kek);
+    kek.unwrap_vec(wrapped)
+        .map_err(|_| crate::ApfsError::FieldOutOfRange {
+            structure: "aes_key_wrap",
+            field: "integrity_check",
+            value: 0,
+            cap: 1,
+        })
 }
 
-/// PBKDF2-HMAC-SHA1, used only to check the plumbing against RFC 6070's vector.
-#[cfg(test)]
+/// PBKDF2-HMAC-SHA256 — the APFS password-stretching step.
 #[must_use]
-pub fn pbkdf2_sha1_for_test(_pw: &[u8], _salt: &[u8], _iters: u32, out_len: usize) -> Vec<u8> {
-    vec![0u8; out_len] // RED stub
+pub fn derive_key_from_password(
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+    out_len: usize,
+) -> Vec<u8> {
+    use hmac::Hmac;
+    use sha2::Sha256;
+
+    let mut out = vec![0u8; out_len];
+    // Iterations come from the volume and are attacker-influenced; a zero count
+    // would make derivation instant, so floor it at 1 rather than trusting it.
+    let iters = iterations.max(1);
+    // Same call shape filevault-forensic uses against a real FVDE volume.
+    // The only failure mode is an invalid output length, which cannot happen for
+    // a Vec we just sized — but it is handled rather than unwrapped, because the
+    // fleet lints deny unwrap/expect in production for exactly this reason.
+    if pbkdf2::pbkdf2::<Hmac<Sha256>>(password, salt, iters, &mut out).is_err() {
+        return Vec::new();
+    }
+    out
 }
 
 #[cfg(test)]
@@ -473,16 +501,27 @@ mod tests {
         );
     }
 
-    /// RED (Tier-1): password stretching must match RFC 6070's published
-    /// PBKDF2-HMAC-SHA1 vector, confirming iteration/salt handling is wired the
-    /// standard way round. APFS uses SHA-256, but the vector proves the plumbing.
+    /// Tier-1: the production derivation must match RFC 7914 section 11's
+    /// published PBKDF2-HMAC-SHA256 vector (c=80000) — third-party artifact and
+    /// answer key, and a high iteration count so the loop is exercised rather
+    /// than a single pass.
+    ///
+    /// Tests `derive_key_from_password` itself, not a test-only variant: a
+    /// vector that validates a function production never calls proves nothing.
     #[test]
-    fn pbkdf2_matches_rfc6070_vector() {
-        let out = pbkdf2_sha1_for_test(b"password", b"salt", 2, 20);
-        let expected: [u8; 20] = [
-            0xEA, 0x6C, 0x01, 0x4D, 0xC7, 0x2D, 0x6F, 0x8C, 0xCD, 0x1E, 0xD9, 0x2A, 0xCE, 0x1D,
-            0x41, 0xF0, 0xD8, 0xDE, 0x89, 0x57,
+    fn pbkdf2_sha256_matches_rfc7914_vector() {
+        let got = derive_key_from_password(b"Password", b"NaCl", 80_000, 64);
+        let expected: [u8; 64] = [
+            0x4D, 0xDC, 0xD8, 0xF6, 0x0B, 0x98, 0xBE, 0x21, 0x83, 0x0C, 0xEE, 0x5E, 0xF2, 0x27,
+            0x01, 0xF9, 0x64, 0x1A, 0x44, 0x18, 0xD0, 0x4C, 0x04, 0x14, 0xAE, 0xFF, 0x08, 0x87,
+            0x6B, 0x34, 0xAB, 0x56, 0xA1, 0xD4, 0x25, 0xA1, 0x22, 0x58, 0x33, 0x54, 0x9A, 0xDB,
+            0x84, 0x1B, 0x51, 0xC9, 0xB3, 0x17, 0x6A, 0x27, 0x2B, 0xDE, 0xBB, 0xA1, 0xD0, 0x78,
+            0x47, 0x8F, 0x62, 0xB3, 0x97, 0xF3, 0x3C, 0x8D,
         ];
-        assert_eq!(out.as_slice(), expected.as_slice(), "RFC 6070 c=2 vector");
+        assert_eq!(
+            got.as_slice(),
+            expected.as_slice(),
+            "RFC 7914 s11 PBKDF2-SHA256 c=80000"
+        );
     }
 }
