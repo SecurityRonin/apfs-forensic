@@ -245,6 +245,24 @@ pub fn parse_wrapped_kek(data: &[u8]) -> crate::Result<WrappedKek> {
     })
 }
 
+/// Unwrap an RFC 3394 AES-KW wrapped key.
+///
+/// # Errors
+/// [`crate::ApfsError::FieldOutOfRange`] if the input is not a valid wrapped key
+/// or the integrity check fails (i.e. the KEK is wrong).
+pub fn aes_key_unwrap(_kek: &[u8; 32], _wrapped: &[u8; 40]) -> crate::Result<Vec<u8>> {
+    // RED stub: structurally valid, wrong value, always Ok — so the vector test
+    // fails on its assertion and the wrong-KEK test fails by NOT erroring.
+    Ok(vec![0u8; 32])
+}
+
+/// PBKDF2-HMAC-SHA1, used only to check the plumbing against RFC 6070's vector.
+#[cfg(test)]
+#[must_use]
+pub fn pbkdf2_sha1_for_test(_pw: &[u8], _salt: &[u8], _iters: u32, out_len: usize) -> Vec<u8> {
+    vec![0u8; out_len] // RED stub
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,5 +425,64 @@ mod tests {
             msg.contains("wrapped_kek_len"),
             "must be rejected for the wrapped-key SIZE, got: {msg}"
         );
+    }
+
+    /// RED (Tier-1): AES key unwrap must match RFC 3394's own published test
+    /// vector. Third-party artifact AND answer key, so this is not
+    /// self-validating — section 4.6, "Wrap 256 bits of Key Data with a 256-bit
+    /// KEK".
+    #[test]
+    fn aes_key_unwrap_matches_rfc3394_vector() {
+        let kek: [u8; 32] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+            0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B,
+            0x1C, 0x1D, 0x1E, 0x1F,
+        ];
+        let wrapped: [u8; 40] = [
+            0x28, 0xC9, 0xF4, 0x04, 0xC4, 0xB8, 0x10, 0xF4, 0xCB, 0xCC, 0xB3, 0x5C, 0xFB, 0x87,
+            0xF8, 0x26, 0x3F, 0x57, 0x86, 0xE2, 0xD8, 0x0E, 0xD3, 0x26, 0xCB, 0xC7, 0xF0, 0xE7,
+            0x1A, 0x99, 0xF4, 0x3B, 0xFB, 0x98, 0x8B, 0x9B, 0x7A, 0x02, 0xDD, 0x21,
+        ];
+        let expected: [u8; 32] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+            0xEE, 0xFF, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
+            0x0C, 0x0D, 0x0E, 0x0F,
+        ];
+        let got = aes_key_unwrap(&kek, &wrapped).expect("RFC 3394 vector must unwrap");
+        assert_eq!(
+            got.as_slice(),
+            expected.as_slice(),
+            "RFC 3394 s4.6 unwrapped key"
+        );
+    }
+
+    /// RED: the integrity check is the whole point of AES-KW. A wrong KEK must be
+    /// REFUSED, not returned as garbage — otherwise a wrong password silently
+    /// yields a wrong key and every later failure is misattributed.
+    #[test]
+    fn aes_key_unwrap_rejects_a_wrong_kek() {
+        let wrong = [0xAAu8; 32];
+        let wrapped: [u8; 40] = [
+            0x28, 0xC9, 0xF4, 0x04, 0xC4, 0xB8, 0x10, 0xF4, 0xCB, 0xCC, 0xB3, 0x5C, 0xFB, 0x87,
+            0xF8, 0x26, 0x3F, 0x57, 0x86, 0xE2, 0xD8, 0x0E, 0xD3, 0x26, 0xCB, 0xC7, 0xF0, 0xE7,
+            0x1A, 0x99, 0xF4, 0x3B, 0xFB, 0x98, 0x8B, 0x9B, 0x7A, 0x02, 0xDD, 0x21,
+        ];
+        assert!(
+            aes_key_unwrap(&wrong, &wrapped).is_err(),
+            "a wrong KEK must fail the AES-KW integrity check, never return bytes"
+        );
+    }
+
+    /// RED (Tier-1): password stretching must match RFC 6070's published
+    /// PBKDF2-HMAC-SHA1 vector, confirming iteration/salt handling is wired the
+    /// standard way round. APFS uses SHA-256, but the vector proves the plumbing.
+    #[test]
+    fn pbkdf2_matches_rfc6070_vector() {
+        let out = pbkdf2_sha1_for_test(b"password", b"salt", 2, 20);
+        let expected: [u8; 20] = [
+            0xEA, 0x6C, 0x01, 0x4D, 0xC7, 0x2D, 0x6F, 0x8C, 0xCD, 0x1E, 0xD9, 0x2A, 0xCE, 0x1D,
+            0x41, 0xF0, 0xD8, 0xDE, 0x89, 0x57,
+        ];
+        assert_eq!(out.as_slice(), expected.as_slice(), "RFC 6070 c=2 vector");
     }
 }
