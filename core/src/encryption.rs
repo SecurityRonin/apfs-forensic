@@ -130,17 +130,118 @@ pub struct WrappedKek {
 
 /// Parse a wrapped-KEK object (BER TLV) into its unwrap inputs.
 ///
+/// Framing is BER definite-length, as the libfsapfs reference reads it: a tag
+/// byte, then a length byte that is either the length itself (high bit clear),
+/// or `0x81`/`0x82` announcing a 1- or 2-byte length that follows. Any other
+/// leading length byte is rejected rather than guessed at.
+///
+/// Unrecognised tags are skipped, not fatal: the format carries fields this
+/// chain does not need (`0x81` volume GUID, `0x82` metadata) and may gain more.
+///
 /// # Errors
-/// [`crate::ApfsError::Corrupt`] when the blob is malformed or a field has a
-/// size the format does not permit.
-pub fn parse_wrapped_kek(_data: &[u8]) -> crate::Result<WrappedKek> {
-    // RED stub: compiles so the tests exercise their assertions, returns values
-    // that are structurally valid but wrong, so a passing test would be a real
-    // signal rather than an artifact of the function not existing.
+/// [`crate::ApfsError::FieldOutOfRange`] when the blob is truncated, a length is
+/// unsupported, or a field has a size the format does not permit. Sizes are
+/// invariants: a wrong-sized wrapped key or salt cannot yield a correct key, and
+/// unwrapping it would produce plausible garbage rather than an error.
+pub fn parse_wrapped_kek(data: &[u8]) -> crate::Result<WrappedKek> {
+    const TAG_WRAPPED_KEK: u8 = 0x83;
+    const TAG_ITERATIONS: u8 = 0x84;
+    const TAG_SALT: u8 = 0x85;
+    /// RFC 3394 output for a 256-bit key: 32-byte key + 8-byte integrity check.
+    const WRAPPED_KEK_LEN: usize = 40;
+    const SALT_LEN: usize = 16;
+
+    // Reuse the crate's existing error vocabulary rather than inventing one, and
+    // carry the offending value: "wrong size" without the size is a prompt to go
+    // and look, not a diagnosis.
+    let bad = |field: &'static str, value: u64, cap: u64| crate::ApfsError::FieldOutOfRange {
+        structure: "wrapped_kek_object",
+        field,
+        value,
+        cap,
+    };
+
+    let mut wrapped_key: Option<Vec<u8>> = None;
+    let mut iterations: Option<u32> = None;
+    let mut salt: Option<Vec<u8>> = None;
+
+    let mut off = 0usize;
+    while off < data.len() {
+        let tag = *data
+            .get(off)
+            .ok_or_else(|| bad("tag", off as u64, data.len() as u64))?;
+        off += 1;
+        let first = *data
+            .get(off)
+            .ok_or_else(|| bad("length", off as u64, data.len() as u64))?;
+        off += 1;
+
+        let len = if first & 0x80 == 0 {
+            first as usize
+        } else if first == 0x81 {
+            let b = *data
+                .get(off)
+                .ok_or_else(|| bad("length_1byte", off as u64, data.len() as u64))?;
+            off += 1;
+            b as usize
+        } else if first == 0x82 {
+            let hi = *data
+                .get(off)
+                .ok_or_else(|| bad("length_2byte", off as u64, data.len() as u64))?;
+            let lo = *data
+                .get(off + 1)
+                .ok_or_else(|| bad("length_2byte", off as u64, data.len() as u64))?;
+            off += 2;
+            ((hi as usize) << 8) | lo as usize
+        } else {
+            return Err(bad("ber_length_form", u64::from(first), 0x82));
+        };
+
+        let end = off
+            .checked_add(len)
+            .ok_or_else(|| bad("value_length", len as u64, data.len() as u64))?;
+        let value = data
+            .get(off..end)
+            .ok_or_else(|| bad("value_end", end as u64, data.len() as u64))?;
+        off = end;
+
+        match tag {
+            TAG_WRAPPED_KEK => {
+                if value.len() != WRAPPED_KEK_LEN {
+                    return Err(bad(
+                        "wrapped_kek_len",
+                        value.len() as u64,
+                        WRAPPED_KEK_LEN as u64,
+                    ));
+                }
+                wrapped_key = Some(value.to_vec());
+            }
+            TAG_ITERATIONS => {
+                if value.is_empty() || value.len() > 8 {
+                    return Err(bad("iterations_len", value.len() as u64, 8));
+                }
+                // Big-endian, minimal width. Saturate rather than wrap: a hostile
+                // count must not silently become a small, fast one.
+                let mut n: u64 = 0;
+                for b in value {
+                    n = (n << 8) | u64::from(*b);
+                }
+                iterations = Some(u32::try_from(n).unwrap_or(u32::MAX));
+            }
+            TAG_SALT => {
+                if value.len() != SALT_LEN {
+                    return Err(bad("salt_len", value.len() as u64, SALT_LEN as u64));
+                }
+                salt = Some(value.to_vec());
+            }
+            _ => {}
+        }
+    }
+
     Ok(WrappedKek {
-        wrapped_key: Vec::new(),
-        iterations: 0,
-        salt: Vec::new(),
+        wrapped_key: wrapped_key.ok_or_else(|| bad("wrapped_kek_tag_0x83", 0, 1))?,
+        iterations: iterations.ok_or_else(|| bad("iterations_tag_0x84", 0, 1))?,
+        salt: salt.ok_or_else(|| bad("salt_tag_0x85", 0, 1))?,
     })
 }
 
@@ -276,19 +377,35 @@ mod tests {
         assert_eq!(kek.salt.as_slice(), salt.as_slice(), "PBKDF2 salt");
     }
 
-    /// RED: sizes are invariants, not suggestions. A hostile blob that declares a
-    /// short wrapped key must be REFUSED, never silently accepted — a 32-byte
-    /// "wrapped key" cannot be RFC 3394 output and unwrapping it would produce
-    /// plausible garbage.
+    /// Sizes are invariants, not suggestions. A hostile blob declaring a short
+    /// wrapped key must be REFUSED: a 32-byte value cannot be RFC 3394 output,
+    /// and unwrapping it would yield plausible garbage rather than an error.
+    ///
+    /// The blob is otherwise COMPLETE — valid iterations and salt — so the wrong
+    /// size is the only defect. An earlier version omitted those fields and
+    /// passed even with the size check deleted, because it was erroring on the
+    /// missing iteration count instead. A rejection test must fail for the one
+    /// reason it names.
     #[test]
     fn wrapped_kek_object_rejects_a_wrong_sized_wrapped_key() {
         let mut blob = Vec::new();
         blob.push(0x83u8);
-        blob.push(32u8);
+        blob.push(32u8); // WRONG: must be 40
         blob.extend_from_slice(&[0u8; 32]);
+        blob.push(0x84u8);
+        blob.push(2u8);
+        blob.extend_from_slice(&[0x27, 0x10]); // 10_000 — valid
+        blob.push(0x85u8);
+        blob.push(16u8);
+        blob.extend_from_slice(&[0u8; 16]); // valid
+
+        let err = parse_wrapped_kek(&blob)
+            .expect_err("a 32-byte wrapped key must be rejected; only 40 is valid");
+        // Assert on the FIELD, so passing for some unrelated reason is not enough.
+        let msg = format!("{err}");
         assert!(
-            parse_wrapped_kek(&blob).is_err(),
-            "a 32-byte wrapped key must be rejected; only 40 is valid"
+            msg.contains("wrapped_kek_len"),
+            "must be rejected for the wrapped-key SIZE, got: {msg}"
         );
     }
 }
