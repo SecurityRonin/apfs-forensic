@@ -114,6 +114,36 @@ pub fn read_keybag(data: &[u8]) -> crate::Result<EncryptionState> {
     })
 }
 
+/// The three inputs the FileVault unwrap chain needs, read from a wrapped-KEK
+/// object in a volume keybag entry.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct WrappedKek {
+    /// RFC 3394 wrapped key encryption key — always 40 bytes (32-byte key + the
+    /// 8-byte integrity check AES-KW prepends).
+    pub wrapped_key: Vec<u8>,
+    /// PBKDF2 iteration count used to derive the unwrapping key from a password.
+    pub iterations: u32,
+    /// PBKDF2 salt — always 16 bytes.
+    pub salt: Vec<u8>,
+}
+
+/// Parse a wrapped-KEK object (BER TLV) into its unwrap inputs.
+///
+/// # Errors
+/// [`crate::ApfsError::Corrupt`] when the blob is malformed or a field has a
+/// size the format does not permit.
+pub fn parse_wrapped_kek(_data: &[u8]) -> crate::Result<WrappedKek> {
+    // RED stub: compiles so the tests exercise their assertions, returns values
+    // that are structurally valid but wrong, so a passing test would be a real
+    // signal rather than an artifact of the function not existing.
+    Ok(WrappedKek {
+        wrapped_key: Vec::new(),
+        iterations: 0,
+        salt: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +232,63 @@ mod tests {
         data[2..4].copy_from_slice(&4u16.to_le_bytes()); // kl_nkeys (lies)
         let st = read_keybag(&data).expect("parse truncated keybag");
         assert!(st.tags_present.is_empty(), "no entry fits → nothing parsed");
+    }
+
+    /// RED: a wrapped-KEK object is a BER TLV blob carrying the three inputs the
+    /// unwrap chain needs — the 40-byte wrapped KEK (`0x83`), the PBKDF2
+    /// iteration count (`0x84`) and the 16-byte salt (`0x85`). Sizes per the
+    /// libfsapfs reference: 40 is exactly RFC 3394 output for a 256-bit key.
+    ///
+    /// Asserts the extracted VALUES, not merely that parsing returned Ok — a
+    /// parser that yielded zeros would otherwise pass.
+    #[test]
+    fn wrapped_kek_object_yields_salt_iterations_and_wrapped_key() {
+        let mut blob = Vec::new();
+        // 0x82 metadata (8 bytes) — present in real objects, must be skipped
+        blob.push(0x82u8);
+        blob.push(8u8);
+        blob.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 0]);
+        // 0x83 wrapped KEK, exactly 40 bytes, long-form length (0x81 + len)
+        blob.push(0x83u8);
+        blob.push(0x81u8);
+        blob.push(40u8);
+        let wrapped: Vec<u8> = (0..40u8)
+            .map(|i| i.wrapping_mul(7).wrapping_add(3))
+            .collect();
+        blob.extend_from_slice(&wrapped);
+        // 0x84 iteration count, big-endian, minimal width
+        blob.push(0x84u8);
+        blob.push(3u8);
+        blob.extend_from_slice(&[0x01, 0xE8, 0x48]); // 125_000
+                                                     // 0x85 salt, exactly 16 bytes
+        blob.push(0x85u8);
+        blob.push(16u8);
+        let salt: Vec<u8> = (0..16u8).map(|i| i ^ 0x5A).collect();
+        blob.extend_from_slice(&salt);
+
+        let kek = parse_wrapped_kek(&blob).expect("a well-formed wrapped-KEK object must parse");
+        assert_eq!(
+            kek.wrapped_key.as_slice(),
+            wrapped.as_slice(),
+            "wrapped KEK bytes"
+        );
+        assert_eq!(kek.iterations, 125_000, "PBKDF2 iteration count");
+        assert_eq!(kek.salt.as_slice(), salt.as_slice(), "PBKDF2 salt");
+    }
+
+    /// RED: sizes are invariants, not suggestions. A hostile blob that declares a
+    /// short wrapped key must be REFUSED, never silently accepted — a 32-byte
+    /// "wrapped key" cannot be RFC 3394 output and unwrapping it would produce
+    /// plausible garbage.
+    #[test]
+    fn wrapped_kek_object_rejects_a_wrong_sized_wrapped_key() {
+        let mut blob = Vec::new();
+        blob.push(0x83u8);
+        blob.push(32u8);
+        blob.extend_from_slice(&[0u8; 32]);
+        assert!(
+            parse_wrapped_kek(&blob).is_err(),
+            "a 32-byte wrapped key must be rejected; only 40 is valid"
+        );
     }
 }
