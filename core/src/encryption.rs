@@ -669,9 +669,18 @@ pub fn decrypt_volume_area(data: &mut [u8], vek: &[u8; 32], tweak_block: u64, bl
     let (Ok(k1), Ok(k2)) = (<&[u8; 16]>::try_from(k1), <&[u8; 16]>::try_from(k2)) else {
         return; // cov:unreachable: a 32-byte array always splits into two 16s
     };
-    let _ = (Xts128::<aes::Aes128>::new, get_tweak_default, k1, k2);
-    let _ = APFS_CRYPTO_SECTOR;
-    // RED stub: leaves the ciphertext untouched.
+    let xts = Xts128::new(aes::Aes128::new(k1.into()), aes::Aes128::new(k2.into()));
+
+    // The stored tweak is in BLOCK units; XTS works in 512-byte sectors even on
+    // 4 KB-block media, so scale once here rather than at every call site.
+    let sectors_per_block = (block_size / APFS_CRYPTO_SECTOR) as u64;
+    let first_sector = tweak_block.saturating_mul(sectors_per_block);
+    xts.decrypt_area(
+        data,
+        APFS_CRYPTO_SECTOR,
+        u128::from(first_sector),
+        get_tweak_default,
+    );
 }
 
 /// Decrypt a keybag area read from an arbitrary offset, without the image.
@@ -1363,7 +1372,6 @@ mod tests {
         );
     }
 
-
     /// Resolve the fixture's volume and its filesystem-tree root omap entry.
     ///
     /// The container superblock, the object maps and the APSB are all plaintext
@@ -1383,10 +1391,12 @@ mod tests {
         let vol_entry = nx_omap
             .resolve(cur, fs_oid, u64::MAX, block_size)
             .expect("volume oid resolves");
-        let vol = crate::volume::ApfsVolume::parse(&read_block_at(img, vol_entry.paddr, block_size))
-            .expect("APSB parses (it is plaintext)");
-        let vol_omap = crate::omap::ObjectMap::parse(&read_block_at(img, vol.omap_oid(), block_size))
-            .expect("volume omap parses");
+        let vol =
+            crate::volume::ApfsVolume::parse(&read_block_at(img, vol_entry.paddr, block_size))
+                .expect("APSB parses (it is plaintext)");
+        let vol_omap =
+            crate::omap::ObjectMap::parse(&read_block_at(img, vol.omap_oid(), block_size))
+                .expect("volume omap parses");
         let entry = vol_omap
             .resolve(cur, vol.root_tree_oid(), u64::MAX, block_size)
             .expect("fs-tree root resolves");
