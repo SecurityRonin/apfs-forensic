@@ -291,6 +291,40 @@ pub fn derive_key_from_password(
     out
 }
 
+/// Walk a BER definite-length TLV blob, returning the value for `want_tag`.
+///
+/// Shared by every packed object in a keybag, so a fix to the framing reaches
+/// all of them rather than only the copy that was noticed.
+fn ber_find(data: &[u8], want_tag: u8) -> Option<&[u8]> {
+    let mut off = 0usize;
+    while off + 2 <= data.len() {
+        let tag = *data.get(off)?;
+        let first = *data.get(off + 1)?;
+        off += 2;
+        let len = if first & 0x80 == 0 {
+            first as usize
+        } else if first == 0x81 {
+            let b = *data.get(off)?;
+            off += 1;
+            b as usize
+        } else if first == 0x82 {
+            let hi = *data.get(off)?;
+            let lo = *data.get(off + 1)?;
+            off += 2;
+            ((hi as usize) << 8) | lo as usize
+        } else {
+            return None;
+        };
+        let end = off.checked_add(len)?;
+        let value = data.get(off..end)?;
+        if tag == want_tag {
+            return Some(value);
+        }
+        off = end;
+    }
+    None
+}
+
 /// Offsets into `nx_superblock_t`, from the libfsapfs reference structure.
 const NX_BLOCK_SIZE: usize = 0x024;
 const NX_CONTAINER_UUID: usize = 0x048;
@@ -402,15 +436,91 @@ pub struct VolumeRecords {
 
 /// Find a volume's records in a DECRYPTED container keybag, by volume UUID.
 ///
+/// Each entry carries the UUID it belongs to, so a multi-volume container keeps
+/// key material separate. Matching on that UUID is what stops one volume's keys
+/// being handed out for another, which would decrypt to garbage and read as
+/// corruption rather than as the lookup error it is.
+///
 /// # Errors
-/// [`crate::ApfsError::FieldOutOfRange`] if the volume is absent or an entry has
-/// a size the format does not permit.
-pub fn volume_records(_keybag: &[u8], _volume_uuid: &[u8; 16]) -> crate::Result<VolumeRecords> {
-    // RED stub: structurally valid, wrong values.
+/// [`crate::ApfsError::FieldOutOfRange`] if the volume is absent, or an entry
+/// has a size the format does not permit.
+pub fn volume_records(keybag: &[u8], volume_uuid: &[u8; 16]) -> crate::Result<VolumeRecords> {
+    /// RFC 3394 output for a 256-bit key.
+    const WRAPPED_VEK_LEN: usize = 40;
+    /// A `prange` is two little-endian u64s: block address then block count.
+    const PRANGE_LEN: usize = 16;
+    /// BER SEQUENCE wrapping a packed object.
+    const TAG_SEQUENCE: u8 = 0x30;
+    /// Context-specific constructed tag holding the wrapped-key object.
+    const TAG_NESTED_OBJECT: u8 = 0xa3;
+    /// BER tag carrying the wrapped key itself.
+    const TAG_WRAPPED_KEY: u8 = 0x83;
+
+    let bad = |field: &'static str, value: u64, cap: u64| crate::ApfsError::FieldOutOfRange {
+        structure: "container_keybag",
+        field,
+        value,
+        cap,
+    };
+
+    let nkeys = (crate::bytes::le_u16(keybag, KL_NKEYS) as usize).min(MAX_KEYBAG_ENTRIES);
+    let mut wrapped_vek: Option<Vec<u8>> = None;
+    let mut extent: Option<(u64, u64)> = None;
+
+    let mut off = KL_ENTRIES_OFF;
+    for _ in 0..nkeys {
+        if off + KE_HEADER_LEN > keybag.len() {
+            break;
+        }
+        let entry_uuid = keybag.get(off..off + 16).unwrap_or(&[]);
+        let raw_tag = crate::bytes::le_u16(keybag, off + KE_TAG);
+        let keylen = crate::bytes::le_u16(keybag, off + KE_KEYLEN) as usize;
+        let data_off = off + KE_HEADER_LEN;
+        let data = keybag.get(data_off..data_off + keylen).unwrap_or(&[]);
+
+        if entry_uuid == volume_uuid.as_slice() {
+            match KeybagTag::from_u16(raw_tag) {
+                KeybagTag::VolumeKey => {
+                    // Nested TWO levels, per the libfsapfs reference:
+                    //   30 SEQUENCE { 80 version, 81 hmac(32), 82 meta(8),
+                    //                 a3 { 83 wrapped key(40), 84 iters, 85 salt } }
+                    // The 32-byte 0x81 is an HMAC, NOT key material. Reading it
+                    // as the key is the mistake this comment exists to prevent.
+                    let seq = ber_find(data, TAG_SEQUENCE).unwrap_or(data);
+                    let obj = ber_find(seq, TAG_NESTED_OBJECT)
+                        .ok_or_else(|| bad("volume_key_missing_0xa3", data.len() as u64, 0xa3))?;
+                    let inner = ber_find(obj, TAG_WRAPPED_KEY)
+                        .ok_or_else(|| bad("volume_key_missing_0x83", obj.len() as u64, 0x83))?;
+                    if inner.len() != WRAPPED_VEK_LEN {
+                        return Err(bad(
+                            "wrapped_vek_len",
+                            inner.len() as u64,
+                            WRAPPED_VEK_LEN as u64,
+                        ));
+                    }
+                    wrapped_vek = Some(inner.to_vec());
+                }
+                KeybagTag::VolumeUnlockRecords => {
+                    if data.len() < PRANGE_LEN {
+                        return Err(bad(
+                            "unlock_records_len",
+                            data.len() as u64,
+                            PRANGE_LEN as u64,
+                        ));
+                    }
+                    extent = Some((crate::bytes::le_u64(data, 0), crate::bytes::le_u64(data, 8)));
+                }
+                _ => {}
+            }
+        }
+        off += ((KE_HEADER_LEN + keylen + 15) & !15).max(16);
+    }
+
+    let (blk, cnt) = extent.ok_or_else(|| bad("volume_unlock_records_absent", 0, 1))?;
     Ok(VolumeRecords {
-        wrapped_vek: Vec::new(),
-        volume_keybag_block: 0,
-        volume_keybag_blocks: 0,
+        wrapped_vek: wrapped_vek.ok_or_else(|| bad("volume_key_absent", 0, 1))?,
+        volume_keybag_block: blk,
+        volume_keybag_blocks: cnt,
     })
 }
 
