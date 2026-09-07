@@ -388,6 +388,32 @@ pub fn decrypt_container_keybag_with_uuid(image: &[u8], uuid: &[u8; 16]) -> crat
     Ok(buf)
 }
 
+/// Where a volume's unlock material lives, read from the container keybag.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct VolumeRecords {
+    /// RFC 3394 wrapped volume encryption key (40 bytes), from `KB_TAG_VOLUME_KEY`.
+    pub wrapped_vek: Vec<u8>,
+    /// Physical block address of the volume keybag, from `KB_TAG_VOLUME_UNLOCK_RECORDS`.
+    pub volume_keybag_block: u64,
+    /// Length of the volume keybag in blocks.
+    pub volume_keybag_blocks: u64,
+}
+
+/// Find a volume's records in a DECRYPTED container keybag, by volume UUID.
+///
+/// # Errors
+/// [`crate::ApfsError::FieldOutOfRange`] if the volume is absent or an entry has
+/// a size the format does not permit.
+pub fn volume_records(_keybag: &[u8], _volume_uuid: &[u8; 16]) -> crate::Result<VolumeRecords> {
+    // RED stub: structurally valid, wrong values.
+    Ok(VolumeRecords {
+        wrapped_vek: Vec::new(),
+        volume_keybag_block: 0,
+        volume_keybag_blocks: 0,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,6 +708,62 @@ mod tests {
         assert!(
             bogus,
             "a wrong UUID must not produce a keybag carrying real volume tags"
+        );
+    }
+
+    /// The volume UUID of the committed fixture, as reported independently by
+    /// the libfsapfs oracle: 75aaf7f9-bf5a-4a4f-86c0-3ef90936bd7c.
+    #[cfg(test)]
+    const FIXTURE_VOLUME_UUID: [u8; 16] = [
+        0x75, 0xAA, 0xF7, 0xF9, 0xBF, 0x5A, 0x4A, 0x4F, 0x86, 0xC0, 0x3E, 0xF9, 0x09, 0x36, 0xBD,
+        0x7C,
+    ];
+
+    /// RED: the container keybag names, per volume, the wrapped VEK
+    /// (`KB_TAG_VOLUME_KEY`) and where that volume's own keybag lives
+    /// (`KB_TAG_VOLUME_UNLOCK_RECORDS`). Both are needed before a password can
+    /// be applied.
+    ///
+    /// Asserts sizes and plausibility, not just presence: a 40-byte wrapped VEK
+    /// is RFC 3394 output for a 256-bit key, and a keybag extent must land
+    /// inside the image.
+    #[test]
+    fn container_keybag_yields_this_volumes_wrapped_vek_and_keybag_extent() {
+        let img = fixture_image();
+        let kb = decrypt_container_keybag(&img).expect("container keybag must decrypt");
+        let rec = volume_records(&kb, &FIXTURE_VOLUME_UUID)
+            .expect("the fixture's volume must be present in its container keybag");
+
+        assert_eq!(
+            rec.wrapped_vek.len(),
+            40,
+            "wrapped VEK must be RFC 3394 output for a 256-bit key"
+        );
+        assert!(
+            rec.volume_keybag_block > 0,
+            "volume keybag block must be set"
+        );
+        assert!(
+            rec.volume_keybag_blocks > 0,
+            "volume keybag length must be non-zero"
+        );
+        let end = (rec.volume_keybag_block as usize + rec.volume_keybag_blocks as usize) * 4096;
+        assert!(
+            end <= img.len(),
+            "volume keybag extent must lie inside the container"
+        );
+    }
+
+    /// RED: an unknown volume UUID must be REFUSED, not answered with the first
+    /// volume that happens to be present. Returning the wrong volume's key
+    /// material would decrypt to garbage and be misread as a corrupt volume.
+    #[test]
+    fn container_keybag_refuses_an_unknown_volume_uuid() {
+        let img = fixture_image();
+        let kb = decrypt_container_keybag(&img).expect("container keybag must decrypt");
+        assert!(
+            volume_records(&kb, &[0x11; 16]).is_err(),
+            "an absent volume UUID must be an error, never another volume's keys"
         );
     }
 }
