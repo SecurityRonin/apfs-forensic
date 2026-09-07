@@ -1622,4 +1622,295 @@ mod tests {
             "a wrong password must be refused, never answered with a key"
         );
     }
+
+    // ── Malformed-input rejection ──
+    //
+    // These crates parse attacker-controllable images, so every "this cannot
+    // happen" branch is a robustness guarantee and gets a test. They also pull
+    // the module back over the coverage floor, but the reason they exist is
+    // that an untested refusal path is a refusal nobody has seen work.
+
+    /// A BER 2-byte length (`0x82`) must be honoured, not guessed at.
+    #[test]
+    fn wrapped_kek_accepts_a_two_byte_ber_length() {
+        // 0x83 with an 0x82-form length of 40, then iterations and salt.
+        let mut blob = vec![0x83, 0x82, 0x00, 40];
+        blob.extend_from_slice(&[0xAA; 40]);
+        blob.extend_from_slice(&[0x84, 0x01, 0x0A]); // iterations = 10
+        blob.push(0x85);
+        blob.push(16);
+        blob.extend_from_slice(&[0xBB; 16]);
+
+        let k = parse_wrapped_kek(&blob).expect("a 2-byte length is legal BER");
+        assert_eq!(k.wrapped_key.len(), 40);
+        assert_eq!(k.iterations, 10);
+        assert_eq!(k.salt.len(), 16);
+    }
+
+    /// An unsupported BER length form must be REFUSED, never guessed at: a
+    /// wrong length silently reinterprets every field after it.
+    #[test]
+    fn wrapped_kek_rejects_an_unsupported_ber_length_form() {
+        // 0x84 as a length form (4-byte) is not supported by this reader.
+        let blob = vec![0x83, 0x84, 0, 0, 0, 40];
+        let e = parse_wrapped_kek(&blob).expect_err("unsupported length form must fail");
+        assert!(
+            format!("{e:?}").contains("ber_length_form"),
+            "the error must name the offending form, got {e:?}"
+        );
+    }
+
+    /// A 2-byte length whose bytes run off the end must fail, not read past it.
+    #[test]
+    fn wrapped_kek_rejects_a_truncated_two_byte_length() {
+        let blob = vec![0x83, 0x82, 0x00]; // second length byte missing
+        assert!(
+            parse_wrapped_kek(&blob).is_err(),
+            "a truncated length must be refused, never over-read"
+        );
+    }
+
+    /// PBKDF2 with a zero iteration count must not silently produce a key.
+    #[test]
+    fn key_derivation_with_zero_iterations_is_floored_not_zero() {
+        // Iterations are floored at 1: a zero would make the KDF a no-op and
+        // hand back something that still looks like a key.
+        let k = derive_key_from_password(b"pw", &[0u8; 16], 0, 32);
+        assert_eq!(k.len(), 32);
+        assert!(k.iter().any(|&b| b != 0), "must still derive real material");
+    }
+
+    /// A container with no NXSB magic is not an APFS image.
+    #[test]
+    fn container_keybag_rejects_a_non_apfs_image() {
+        let img = vec![0u8; 4096];
+        let e = decrypt_container_keybag(&img).expect_err("no NXSB must fail");
+        assert!(format!("{e:?}").contains("magic"), "got {e:?}");
+    }
+
+    /// A block size that is not a whole number of 512-byte sectors cannot be
+    /// XTS-addressed, so it is refused rather than rounded.
+    #[test]
+    fn container_keybag_rejects_an_unusable_block_size() {
+        let mut img = vec![0u8; 8192];
+        img[32..36].copy_from_slice(b"NXSB");
+        img[NX_BLOCK_SIZE..NX_BLOCK_SIZE + 4].copy_from_slice(&777u32.to_le_bytes());
+        let e = decrypt_container_keybag(&img).expect_err("odd block size must fail");
+        assert!(format!("{e:?}").contains("block_size"), "got {e:?}");
+    }
+
+    /// A container declaring no keybag is not encrypted; say so rather than
+    /// decrypting whatever happens to sit at block zero.
+    #[test]
+    fn container_keybag_rejects_an_absent_keylocker() {
+        let mut img = vec![0u8; 8192];
+        img[32..36].copy_from_slice(b"NXSB");
+        img[NX_BLOCK_SIZE..NX_BLOCK_SIZE + 4].copy_from_slice(&4096u32.to_le_bytes());
+        // nx_keylocker left zero.
+        let e = decrypt_container_keybag(&img).expect_err("absent keylocker must fail");
+        assert!(format!("{e:?}").contains("keylocker_extent"), "got {e:?}");
+    }
+
+    /// A keybag extent pointing past the image must fail, not read past it.
+    #[test]
+    fn container_keybag_rejects_an_extent_past_the_image() {
+        let mut img = vec![0u8; 8192];
+        img[32..36].copy_from_slice(b"NXSB");
+        img[NX_BLOCK_SIZE..NX_BLOCK_SIZE + 4].copy_from_slice(&4096u32.to_le_bytes());
+        img[NX_KEYBAG_BLOCK..NX_KEYBAG_BLOCK + 8].copy_from_slice(&9999u64.to_le_bytes());
+        img[NX_KEYBAG_BLOCKS..NX_KEYBAG_BLOCKS + 8].copy_from_slice(&1u64.to_le_bytes());
+        assert!(
+            decrypt_container_keybag(&img).is_err(),
+            "an extent past the image must be refused"
+        );
+    }
+
+    /// `decrypt_volume_area` leaves data alone when the tweak is the
+    /// not-encrypted sentinel, or when the block size cannot hold a sector.
+    #[test]
+    fn volume_area_decryption_is_a_no_op_for_the_sentinel_and_short_blocks() {
+        let original = vec![0x5Au8; 4096];
+
+        let mut a = original.clone();
+        decrypt_volume_area(&mut a, &[7u8; 32], 0, 4096);
+        assert_eq!(a, original, "tweak 0 means not encrypted: leave it alone");
+
+        let mut b = original.clone();
+        decrypt_volume_area(&mut b, &[7u8; 32], 5, 256);
+        assert_eq!(
+            b, original,
+            "a block smaller than a sector cannot be XTS-addressed"
+        );
+    }
+
+    /// A keybag whose entry count overruns the blob stops at the boundary.
+    #[test]
+    fn volume_records_stops_at_the_end_of_a_short_keybag() {
+        let mut kb = vec![0u8; OBJ_PHYS_LEN + 16];
+        kb[KL_NKEYS..KL_NKEYS + 2].copy_from_slice(&50u16.to_le_bytes());
+        assert!(
+            volume_records(&kb, &[0x11; 16]).is_err(),
+            "no matching volume in a truncated keybag must be an error, not a guess"
+        );
+    }
+
+    /// A volume keybag with no KEK object must be reported as such.
+    #[test]
+    fn unlock_with_volume_keybag_reports_a_missing_kek_object() {
+        let records = VolumeRecords {
+            wrapped_vek: vec![0u8; 40],
+            volume_keybag_block: 1,
+            volume_keybag_blocks: 1,
+        };
+        let empty = vec![0u8; OBJ_PHYS_LEN + 16];
+        let e =
+            unlock_with_volume_keybag(&empty, &records, "pw").expect_err("no KEK object must fail");
+        assert!(format!("{e:?}").contains("kek_object_absent"), "got {e:?}");
+    }
+
+    /// A wrapped VEK of the wrong size cannot yield a key; refuse rather than
+    /// unwrap something that will produce plausible garbage.
+    #[test]
+    fn unlock_with_volume_keybag_rejects_a_wrong_sized_wrapped_vek() {
+        let img = fixture_image();
+        let block_size = crate::bytes::le_u32(&img, NX_BLOCK_SIZE) as usize;
+        let container_kb = decrypt_container_keybag(&img).expect("keybag decrypts");
+        let mut rec = volume_records(&container_kb, &FIXTURE_VOLUME_UUID).expect("records");
+        rec.wrapped_vek.truncate(8); // no longer 40 bytes
+
+        let vs = rec.volume_keybag_block as usize * block_size;
+        let ve = vs + rec.volume_keybag_blocks as usize * block_size;
+        let vkb = decrypt_keybag_area(&img[vs..ve], &FIXTURE_VOLUME_UUID, vs / KEYBAG_SECTOR);
+
+        let e = unlock_with_volume_keybag(&vkb, &rec, "apfs-FV-TEST-2026")
+            .expect_err("a short wrapped VEK must fail");
+        assert!(format!("{e:?}").contains("wrapped_vek_len"), "got {e:?}");
+    }
+
+    /// `unlock_volume` must refuse an image it cannot even parse, rather than
+    /// reporting a password problem.
+    #[test]
+    fn unlock_volume_rejects_an_unparseable_image() {
+        assert!(
+            unlock_volume(&[0u8; 4096], &[0x22; 16], "pw").is_err(),
+            "a non-APFS image is an image error, not a password error"
+        );
+    }
+
+    /// Build a container keybag naming one volume, with caller-chosen entry
+    /// payloads, so the malformed shapes below are exercised through the real
+    /// parser rather than around it.
+    #[cfg(test)]
+    fn container_keybag_for(uuid: &[u8; 16], entries: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        let mut data = vec![0u8; OBJ_PHYS_LEN + 16];
+        data[24..28].copy_from_slice(b"syek");
+        data[OBJ_PHYS_LEN..OBJ_PHYS_LEN + 2].copy_from_slice(&1u16.to_le_bytes());
+        data[KL_NKEYS..KL_NKEYS + 2].copy_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, payload) in entries {
+            let mut e = vec![0u8; KE_HEADER_LEN + payload.len()];
+            e[..16].copy_from_slice(uuid);
+            e[KE_TAG..KE_TAG + 2].copy_from_slice(&tag.to_le_bytes());
+            e[KE_KEYLEN..KE_KEYLEN + 2].copy_from_slice(&(payload.len() as u16).to_le_bytes());
+            e[KE_HEADER_LEN..].copy_from_slice(payload);
+            let padded = (e.len() + 15) & !15;
+            e.resize(padded, 0);
+            data.extend_from_slice(&e);
+        }
+        data
+    }
+
+    /// A wrapped VEK that is not RFC 3394 output for a 256-bit key cannot yield
+    /// a key. Refuse, rather than unwrap it into plausible garbage.
+    #[test]
+    fn volume_records_rejects_a_wrong_sized_wrapped_vek() {
+        let uuid = [0x33u8; 16];
+        // 0x30 SEQUENCE > 0xa3 > 0x83 wrapped key, but only 8 bytes not 40.
+        let inner = vec![0x83, 8, 0, 0, 0, 0, 0, 0, 0, 0];
+        let a3 = {
+            let mut v = vec![0xa3, inner.len() as u8];
+            v.extend_from_slice(&inner);
+            v
+        };
+        let seq = {
+            let mut v = vec![0x30, a3.len() as u8];
+            v.extend_from_slice(&a3);
+            v
+        };
+        let kb = container_keybag_for(&uuid, &[(0x02, seq)]);
+        let e = volume_records(&kb, &uuid).expect_err("a short wrapped VEK must be refused");
+        assert!(format!("{e:?}").contains("wrapped_vek_len"), "got {e:?}");
+    }
+
+    /// The unlock-records entry carries a `prange_t` (block, count). Anything
+    /// shorter is not one, and reading it would invent an extent.
+    #[test]
+    fn volume_records_rejects_short_unlock_records() {
+        let uuid = [0x44u8; 16];
+        let kb = container_keybag_for(&uuid, &[(0x03, vec![0u8; 4])]);
+        let e = volume_records(&kb, &uuid).expect_err("a short prange must be refused");
+        assert!(format!("{e:?}").contains("unlock_records_len"), "got {e:?}");
+    }
+
+    /// A volume entry carrying no wrapped key at all is incomplete, not empty.
+    #[test]
+    fn volume_records_rejects_a_volume_key_entry_with_no_wrapped_key() {
+        let uuid = [0x55u8; 16];
+        // A SEQUENCE with an 0xa3 that holds no 0x83.
+        let a3 = vec![0xa3, 2, 0x99, 0];
+        let seq = {
+            let mut v = vec![0x30, a3.len() as u8];
+            v.extend_from_slice(&a3);
+            v
+        };
+        let kb = container_keybag_for(&uuid, &[(0x02, seq)]);
+        assert!(
+            volume_records(&kb, &uuid).is_err(),
+            "a volume key entry with no 0x83 must be refused"
+        );
+    }
+
+    /// `find_kek_object` walks BER with the same definite-length rules; an
+    /// unsupported length form must abandon the entry rather than misread it.
+    #[test]
+    fn a_volume_keybag_with_an_unsupported_ber_length_yields_no_kek() {
+        let uuid = [0x66u8; 16];
+        // 0x30 SEQUENCE whose length uses the unsupported 0x84 form.
+        let seq = vec![0x30, 0x84, 0, 0, 0, 4, 0xa3, 2, 0x83, 0];
+        let kb = container_keybag_for(&uuid, &[(0x01, seq)]);
+        let records = VolumeRecords {
+            wrapped_vek: vec![0u8; 40],
+            volume_keybag_block: 1,
+            volume_keybag_blocks: 1,
+        };
+        let e = unlock_with_volume_keybag(&kb, &records, "pw")
+            .expect_err("an unreadable KEK object must fail");
+        assert!(format!("{e:?}").contains("kek_object_absent"), "got {e:?}");
+    }
+
+    /// A two-byte BER length inside a volume keybag must be honoured, so a
+    /// legitimately large KEK object is found rather than skipped.
+    #[test]
+    fn a_volume_keybag_with_a_two_byte_ber_length_is_walked() {
+        let uuid = [0x77u8; 16];
+        let mut a3 = vec![0xa3, 0x81, 44];
+        a3.extend_from_slice(&[0x83, 40]);
+        a3.extend_from_slice(&[0xCC; 40]);
+        a3.extend_from_slice(&[0x84, 0x01, 0x05]); // iterations
+        let mut seq = vec![0x30, 0x82, 0x00, a3.len() as u8];
+        seq.extend_from_slice(&a3);
+        let kb = container_keybag_for(&uuid, &[(0x01, seq)]);
+        let records = VolumeRecords {
+            wrapped_vek: vec![0u8; 40],
+            volume_keybag_block: 1,
+            volume_keybag_blocks: 1,
+        };
+        // The object is FOUND (so the walk honoured 0x82); it then fails later
+        // for a missing salt, which is the point: not "kek_object_absent".
+        let e = unlock_with_volume_keybag(&kb, &records, "pw")
+            .expect_err("a KEK object without a salt cannot derive a key");
+        assert!(
+            !format!("{e:?}").contains("kek_object_absent"),
+            "the 0x82 length must have been walked, got {e:?}"
+        );
+    }
 }
