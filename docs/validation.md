@@ -1,10 +1,21 @@
 # Validation
 
-> **Status: P7 FileVault unwrap, P8 encrypted-volume file reading, and P9 core
-> read paths validated at Tier 1; P5–P6 (snapshots, space manager) remain
-> Tier 2.** Results are recorded here
-> as each phase lands; sealed volumes are still in progress. Claims below are
-> scoped to the validated capabilities and tiered.
+> **Status — most of this repo is still Tier 2.** Tier 1 covers the FileVault
+> unwrap chain (P7), encrypted-volume file reading (P8), and exactly those core
+> read paths the third-party dfVFS corpus exercises (P9): directory listing,
+> path resolution, inode *numbers*, file byte assembly, extended attributes,
+> symlink targets and resource forks.
+>
+> Everything else remains Tier 2, including parts of the very sections P9
+> touches: **decmpfs compression** (no compressed file exists in the dfVFS
+> corpus), **inode metadata** — timestamps, mode, ownership, which dfVFS
+> asserts only for presence, never by value — and all of
+> snapshots (P5), the space manager and reaper (P6), fusion detection, and
+> sealed volumes.
+>
+> A per-phase heading below says Tier 2 where P9 raised only *part* of what that
+> phase covers; the heading is the conservative claim and P9's table is the
+> precise one. Read them together, and prefer the narrower.
 
 ## How to read the evidence tiers
 
@@ -58,6 +69,12 @@ ourselves.
 
 ### Object map + B-tree navigation + volume-superblock resolution (P2) — Tier 2
 
+> **Exercised, not validated, by P9.** Reaching any dfVFS file requires this
+> machinery to work, so P9 is indirect evidence it does. The specific claims
+> below — checksum-before-trust, cycle guards, the fixture's own geometry —
+> are asserted against a fixture we minted and remain Tier 2. Working is not
+> the same as validated against an independent expectation.
+
 **Corpus:** `tests/data/apfs_container_chain.bin` — blocks 0–344 (1.38 MiB) of a
 real APFS *container partition* minted by Apple's own `hdiutil`
 (`hdiutil create -size 128m -fs APFS -volname APFSORACLE -layout GPTSPUD`). The
@@ -107,6 +124,21 @@ bit (offset 64, value `0x100`, Apple *APFS Reference*) on the bootstrap superblo
 
 ### Volume superblock + fs-record dispatch + inode metadata + name→inode (P3) — Tier 2
 
+> **Partially raised by P9.** `name→inode` resolution and inode *numbers* are
+> Tier 1 against the dfVFS corpus. Inode **metadata** — timestamps, mode,
+> ownership — is not, and dfVFS cannot close it: its timestamp tests are nine
+> `assertIsNotNone` presence checks with **no pinned values** anywhere in the
+> file. Asserting against them would validate that a field is populated, not
+> that it decodes correctly.
+>
+> (Recorded because the method names `testAccessTime` / `testModificationTime`
+> read like value oracles and are not. A test name is a claim about a test, not
+> about the world — read the body.)
+>
+> Closing this needs a corpus whose timestamps are documented independently:
+> macOS `stat` output captured alongside a minted image raises the *oracle* but
+> not the corpus, so it reaches Tier 2 only.
+
 **Corpus:** `tests/data/apfs_fstree.bin` — blocks 0–373 (1.46 MiB) of a real APFS
 *container partition* minted by Apple's own `hdiutil`
 (`hdiutil create -size 128m -fs APFS -volname APFSP3 -layout GPTSPUD`), populated
@@ -146,6 +178,12 @@ on a **self-minted** corpus ⇒ Tier 2. A Tier-1 lift needs the same navigation 
 on a real-world macOS image (env-gated, future work).
 
 ### File byte read + decmpfs + xattr + symlink (P4) — Tier 2
+
+> **Partially raised by P9.** File byte assembly, extended attributes,
+> symlink targets and resource forks are Tier 1 against the dfVFS corpus.
+> **decmpfs is not** — that corpus contains no compressed file, so every
+> decmpfs claim still rests on a fixture we minted. A third-party image with
+> an LZVN/LZFSE-compressed file would close it.
 
 **Corpus:** `tests/data/apfs_content.bin` — the first **442 blocks** (1.73 MiB,
 4096-byte blocks) of a real APFS *container partition* minted by Apple's own
