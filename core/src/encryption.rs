@@ -1409,4 +1409,74 @@ mod tests {
         let start = paddr as usize * block_size;
         img[start..start + block_size].to_vec()
     }
+
+    /// The plaintext written into the fixture BEFORE it was encrypted. Its
+    /// absence from the raw image is what proves the fixture is genuinely
+    /// encrypted; its recovery here is what proves we can decrypt it.
+    #[cfg(test)]
+    const MARKER: &str = "APFS-FILEVAULT-GROUND-TRUTH-MARKER-0123456789";
+
+    /// RED: read a real file off an encrypted volume and get its known bytes.
+    ///
+    /// This is the claim every earlier test stopped short of. A recovered VEK
+    /// that passes AES-KW proves the key is AUTHENTIC; a checksum-valid node
+    /// proves it is CORRECT; only this proves the whole stack -- node
+    /// decryption, extent crypto_id tweaks, and assembly -- actually yields the
+    /// file a user wrote.
+    ///
+    /// Ground truth is independent of the reader: the marker string was written
+    /// by macOS before encryption and is absent from the raw image (asserted
+    /// below), so it cannot be produced by anything except correct decryption.
+    #[test]
+    fn a_file_on_an_encrypted_volume_reads_back_as_its_known_plaintext() {
+        let img = fixture_image();
+
+        assert!(
+            !img.windows(MARKER.len()).any(|w| w == MARKER.as_bytes()),
+            "the marker must NOT appear in the raw image, or the volume was never encrypted \
+             and this test would pass without decrypting anything"
+        );
+
+        let vek_v = unlock_volume(&img, &FIXTURE_VOLUME_UUID, "apfs-FV-TEST-2026")
+            .expect("fixture must unlock")
+            .vek;
+        let vek: [u8; 32] = vek_v.as_slice().try_into().expect("VEK is 32 bytes");
+
+        let block_size = crate::bytes::le_u32(&img, NX_BLOCK_SIZE) as usize;
+        let mut cur = std::io::Cursor::new(&img[..]);
+        let (_, mut vol) = fs_tree_root(&img, &mut cur, block_size);
+        vol.set_vek(vek);
+
+        let inode = crate::dir::open_path(&mut cur, &vol, "marker.txt", block_size)
+            .expect("marker.txt must be found on the decrypted fs-tree");
+        let data = crate::extent::read_data(&mut cur, &vol, &inode, block_size)
+            .expect("its contents must decrypt");
+
+        assert_eq!(
+            String::from_utf8_lossy(&data).trim_end(),
+            MARKER,
+            "the decrypted file must be byte-for-byte what macOS wrote"
+        );
+    }
+
+    /// RED: without the key the same read must FAIL, not return garbage.
+    /// Returning plausible bytes for a locked volume would be evidence
+    /// fabrication -- the worst outcome available to a forensic reader.
+    #[test]
+    fn the_same_file_is_unreadable_without_the_key() {
+        let img = fixture_image();
+        let block_size = crate::bytes::le_u32(&img, NX_BLOCK_SIZE) as usize;
+        let mut cur = std::io::Cursor::new(&img[..]);
+        let (_, vol) = fs_tree_root(&img, &mut cur, block_size);
+
+        let r = crate::dir::open_path(&mut cur, &vol, "marker.txt", block_size)
+            .and_then(|i| crate::extent::read_data(&mut cur, &vol, &i, block_size));
+        match r {
+            Err(_) => {}
+            Ok(data) => panic!(
+                "a locked volume must refuse, not answer; got {} bytes",
+                data.len()
+            ),
+        }
+    }
 }
