@@ -1,7 +1,8 @@
 # Validation
 
-> **Status: phases P1–P5 validated (Tier 2).** Results are recorded here as each
-> phase lands; later phases (spaceman, encryption, sealed) are still in progress.
+> **Status: P1–P6 validated (Tier 2); P7 FileVault unwrap chain validated
+> (Tier 1, chain only).** Results are recorded here as each phase lands; later
+> phases (sealed volumes, AES-XTS file decryption) are still in progress.
 > Claims below are scoped to the validated capabilities and tiered.
 
 ## How to read the evidence tiers
@@ -326,3 +327,51 @@ decode these fields. The independent free-count cross-check above (345 from the
 bitmap == 345 from the spaceman accounting) is what raises this to Tier 2 on our
 real fixture. The populated reap-list walk is Tier 3 (no committed fixture has a
 queued reaper; a real deleted-volume image would lift it).
+
+### FileVault unwrap chain: password → KEK → VEK (P7) — Tier 1 (chain only)
+
+**What P7 does.** Recovers a volume encryption key from an APFS-native encrypted
+volume given its password: container keybag (AES-128-XTS, keyed on the container
+UUID, tweaked by absolute sector) → per-volume records → volume keybag (same
+scheme, keyed on the *volume* UUID) → wrapped-KEK object (BER TLV: `0x83`
+wrapped key, `0x84` iterations, `0x85` salt) → PBKDF2-HMAC-SHA256 → AES key
+unwrap (RFC 3394) for the KEK, then again for the VEK.
+
+**Why this reaches Tier 1 where the fixture alone does not.** The committed
+fixture is Tier 2: real Apple-written bytes, but we chose the scenario and set
+the password, so a test against it grades our own homework. The Tier-1 claim
+rests on a different artifact entirely — an examiner's **real-world encrypted
+external disk**, minted by macOS on hardware we never touched, carrying a
+password never disclosed to the implementation's author, acquired independently
+with `ddrescue`. Identifiers are case material and are recorded outside this
+repository.
+
+**The oracle is cryptographic, not a comparison.** Nothing here is checked by
+diffing against our own expectation. RFC 3394 key unwrap carries a 64-bit
+integrity check value and fails closed, and the chain must pass it **twice** —
+password→KEK, then KEK→VEK. A wrong salt, iteration count, TLV parse, XTS tweak,
+or UUID keying yields bytes that cannot satisfy it. The check was written into
+the artifact by Apple and is implemented by `aes-kw`, so the confirming authority
+is independent of this codebase in both directions.
+
+| Claim | Evidence | Oracle / tier |
+|---|---|---|
+| the chain recovers a volume key from a real-world encrypted disk | the examiner's own password produced `UNLOCKED`, 32-byte key, on a real acquired image | RFC 3394 ICV, twice (**Tier 1**) |
+| a wrong password is refused, never answered with bytes | same image, deliberately wrong password: `REFUSED` at 1/1 volumes, structures intact | RFC 3394 ICV (**Tier 1**) |
+| the same chain works on committed bytes in CI | fixture unlocks with its recorded password; wrong password refused | fixture (**Tier 2**) |
+| a non-APFS input is rejected loudly, not answered | a file of zeros exits 2 with "no NXSB container superblock" | construction |
+| the chain is usable on real evidence at all | 12,288 bytes read (one superblock, two keybag areas) from a 2 TB image | measured (**Tier 1**) |
+| VEK value stability across refactors | pinned SHA-256 of the fixture's VEK | regression pin (**Tier 3** — see flag) |
+
+**Flag (honest tiering), and it is the important one.** Tier 1 here covers the
+**unwrap chain only** — that a correct password yields the authentic volume key
+and a wrong one is refused. It does **not** cover reading file contents: AES-XTS
+decryption of volume blocks is not implemented, so no claim is made that the
+recovered key decrypts data correctly.
+
+The pinned VEK fingerprint is explicitly **Tier 3**: it pins the current
+implementation's output and proves the answer stopped changing, never that it was
+right. Its value was demonstrated rather than assumed — a mutation returning a
+constant key left the two-path equality assertion green, and only the pin caught
+it. The Tier-1 real-world unlock is what carries the correctness claim; the pin
+guards against silent drift.
