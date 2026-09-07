@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "apfs-core"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "aes",
  "aes-kw",
@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "apfs-forensic"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "apfs-core",
  "chrono",
