@@ -87,3 +87,57 @@ The container superblock's `nx_keylocker` points at the container keybag —
 in this image, one block at paddr 356, high-entropy because APFS stores the
 keybag encrypted (keyed from the container UUID). That is the entry point for
 the unwrap chain: container keybag → volume keybag → KEK → VEK → AES-XTS.
+
+## `dfvfs-apfs-encrypted.dmg.gz` — the Tier-1 corpus
+
+The fixture above is **structurally incapable of exceeding Tier 2**: we minted
+the volume, wrote the marker, and chose the password, so its ground truth is our
+own. Confirming it confirms us. This one removes our authorship from every input.
+
+| | |
+|---|---|
+| Source | [log2timeline/dfvfs](https://github.com/log2timeline/dfvfs) `test_data/apfs_encrypted.dmg` |
+| Download | `https://raw.githubusercontent.com/log2timeline/dfvfs/main/test_data/apfs_encrypted.dmg` |
+| Password | `apfs-TEST` — dfVFS `tests/lib/apfs_helper.py`, `_APFS_PASSWORD` |
+| Original MD5 | `8da806a7b49499eff6c4b32f3a75336e` |
+| Original SHA-256 | `33fe6f183aeb1a95fec68efdab17d59aedbad3d8ef1a117d411117376d9d8485` |
+| Original size | 4,194,304 bytes (GPT image; APFS container at byte **20480**) |
+| Stored here | gzipped, 71,234 bytes, SHA-256 `efc62392c6f88201dedd0ff06e9787f6619a1913e38af0180dd63964581fe821` |
+| Redistribution | Apache-2.0 (dfVFS), attribution above |
+| Tier | **1** — third party authored the artifact, the password, and the answer key |
+
+### The answer key, and where each part comes from
+
+Nothing below was written by us:
+
+| Expectation | Third-party source |
+|---|---|
+| root holds `.fseventsd`, `a_directory`, `a_link`, `passwords.txt` | `tests/vfs/apfs_file_entry.py`, `expected_sub_file_entry_names` |
+| `/a_directory/another_file` inode = **21** | `APFSFileEntryTestEncrypted._IDENTIFIER_ANOTHER_FILE` |
+| its bytes = `This is another file.\n` | `utils/generate_test_data_macos.sh` heredoc; matches committed `test_data/another_file`, SHA-256 `c7fbc0e821c0871805a99584c6a384533909f68a6bbe9a2a687d28d9f3b10c16` |
+| `passwords.txt` begins `place,user,password` | the same generator heredoc |
+
+### Two traps this fixture set, both hit
+
+**Read the identifiers from the ENCRYPTED test class.** `apfs_file_entry.py`
+declares `_IDENTIFIER_*` twice: once at the top for the unencrypted `apfs.raw`
+(`another_file` = 19) and again inside `APFSFileEntryTestEncrypted` (= **21**).
+Transcribing the first set produced a red test that looked exactly like a
+decoder bug. Our reader was right and the note was wrong.
+
+**Assert the BYTES, not the size.** An early version pinned only
+`data.len() == 22`. Decryption cannot change how many bytes a file has, so that
+assertion tests the extent map and nothing about the crypto — a deliberately
+corrupted extent tweak passed it. It fails on the byte-exact assertion.
+
+### Reproducing
+
+```bash
+curl -L -o apfs_encrypted.dmg \
+  https://raw.githubusercontent.com/log2timeline/dfvfs/main/test_data/apfs_encrypted.dmg
+shasum -a 256 apfs_encrypted.dmg   # 33fe6f18...
+gzip -9 -c apfs_encrypted.dmg > dfvfs-apfs-encrypted.dmg.gz
+```
+
+The container does not start at offset 0: it is partition 1 of a GPT disk,
+beginning at byte 20480. The test slices there.

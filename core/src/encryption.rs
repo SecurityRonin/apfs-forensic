@@ -1479,4 +1479,147 @@ mod tests {
             ),
         }
     }
+
+    // ── TIER 1: third-party artifact, third-party password, third-party answer key ──
+
+    /// The dfVFS test image: a GPT-partitioned raw image whose APFS container
+    /// begins at byte 20480 (partition 1).
+    #[cfg(test)]
+    const DFVFS_CONTAINER_OFFSET: usize = 20480;
+
+    /// Load the dfVFS encrypted APFS image and return its CONTAINER bytes.
+    #[cfg(test)]
+    fn dfvfs_container() -> Vec<u8> {
+        use std::io::Read as _;
+        let gz = include_bytes!("../../tests/data/filevault/dfvfs-apfs-encrypted.dmg.gz");
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(&gz[..])
+            .read_to_end(&mut out)
+            .expect("dfVFS fixture must decompress");
+        out.split_off(DFVFS_CONTAINER_OFFSET)
+    }
+
+    /// TIER 1: read files from an image WE DID NOT MAKE, with a password we did
+    /// not choose, and check them against expectations we did not write.
+    ///
+    /// Everything self-minted is Tier 2 by construction: a marker we wrote, on a
+    /// volume we encrypted, with a password we picked, is ground truth we
+    /// authored, and confirming it confirms us. This test removes our authorship
+    /// from every input.
+    ///
+    /// | input | who authored it |
+    /// |---|---|
+    /// | `apfs_encrypted.dmg` | dfVFS (log2timeline), Apache-2.0 |
+    /// | password `apfs-TEST` | dfVFS `tests/lib/apfs_helper.py` |
+    /// | expected tree + sizes | dfVFS `tests/vfs/apfs_file_entry.py` |
+    ///
+    /// Expectations are transcribed from `APFSFileEntryTestEncrypted` in that
+    /// file: the root holds `.fseventsd`, `a_directory`, `a_link` and
+    /// `passwords.txt`; `/a_directory/another_file` is 22 bytes with inode 21.
+    ///
+    /// Read them from the ENCRYPTED class, not the top of the file. The
+    /// unencrypted `apfs.raw` class declares its own `_IDENTIFIER_*` constants
+    /// (`another_file` is 19 there, 21 here). Copying the first set that appears
+    /// produces a failure that looks like a decoder bug and is not one -- it
+    /// happened while writing this test, and our reader was right.
+    #[test]
+    fn tier1_third_party_encrypted_image_reads_against_a_third_party_answer_key() {
+        let img = dfvfs_container();
+
+        // Guard the test itself: none of the answer key may sit in plaintext,
+        // or the read could succeed without decrypting anything.
+        for name in [b"passwords.txt".as_slice(), b"another_file".as_slice()] {
+            assert!(
+                !img.windows(name.len()).any(|w| w == name),
+                "{} appears in plaintext; this image is not really encrypted",
+                String::from_utf8_lossy(name)
+            );
+        }
+
+        let block_size = crate::bytes::le_u32(&img, NX_BLOCK_SIZE) as usize;
+
+        // The volume UUID comes from the image, not from us.
+        let container_kb = decrypt_container_keybag(&img).expect("container keybag decrypts");
+        let volume_uuid: [u8; 16] = container_kb[48..64].try_into().expect("16 bytes");
+
+        let vek_v = unlock_volume(&img, &volume_uuid, "apfs-TEST")
+            .expect("dfVFS's published password must unlock dfVFS's image")
+            .vek;
+        let vek: [u8; 32] = vek_v.as_slice().try_into().expect("VEK is 32 bytes");
+
+        let mut cur = std::io::Cursor::new(&img[..]);
+        let (_, mut vol) = fs_tree_root(&img, &mut cur, block_size);
+        vol.set_vek(vek);
+
+        // (1) the root listing matches dfVFS's expected_sub_file_entry_names
+        let mut names: Vec<String> = crate::dir::list_dir(&mut cur, &vol, 2, block_size)
+            .expect("root directory must list")
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![".fseventsd", "a_directory", "a_link", "passwords.txt"],
+            "root listing must match dfVFS's own expectations"
+        );
+
+        // (2) the file dfVFS pins at 22 bytes, read through the full stack
+        let inode = crate::dir::open_path(&mut cur, &vol, "a_directory/another_file", block_size)
+            .expect("/a_directory/another_file must resolve");
+        assert_eq!(
+            inode.oid, 21,
+            "dfVFS's APFSFileEntryTestEncrypted pins this file's inode at 21"
+        );
+        let data = crate::extent::read_data(&mut cur, &vol, &inode, block_size)
+            .expect("its contents must decrypt");
+
+        // Exact BYTES, not length. Asserting the size alone let a corrupted
+        // extent tweak pass a mutation run -- decryption cannot change how many
+        // bytes a file has, so a length check tests the extent map and nothing
+        // about the crypto.
+        //
+        // Content comes from dfVFS's own generator,
+        // utils/generate_test_data_macos.sh:
+        //     cat >${MOUNT_POINT}/a_directory/another_file <<EOT
+        //     This is another file.
+        //     EOT
+        // and matches their committed test_data/another_file
+        // (sha256 c7fbc0e821c0871805a99584c6a384533909f68a6bbe9a2a687d28d9f3b10c16).
+        assert_eq!(
+            data.as_slice(),
+            b"This is another file.\n",
+            "the decrypted bytes must equal what dfVFS's generator wrote"
+        );
+
+        // A second file, written by the same generator, so one lucky extent
+        // cannot carry the claim. Its first line is pinned rather than the
+        // whole body -- the generator is the authority on both.
+        let pw = crate::dir::open_path(&mut cur, &vol, "passwords.txt", block_size)
+            .expect("/passwords.txt must resolve");
+        let pw_data = crate::extent::read_data(&mut cur, &vol, &pw, block_size)
+            .expect("passwords.txt must decrypt");
+        assert!(
+            pw_data.starts_with(b"place,user,password\n"),
+            "passwords.txt must decrypt to the generator's heredoc, got {:?}",
+            String::from_utf8_lossy(&pw_data[..pw_data.len().min(40)])
+        );
+        assert!(
+            pw_data.windows(23).any(|w| w == b"bank,joesmith,superrich"),
+            "and must contain the generator's second line"
+        );
+    }
+
+    /// TIER 1 control: the wrong password must be refused on the third-party
+    /// image too, so the unlock above is a result rather than a formality.
+    #[test]
+    fn tier1_third_party_image_refuses_a_wrong_password() {
+        let img = dfvfs_container();
+        let container_kb = decrypt_container_keybag(&img).expect("container keybag decrypts");
+        let volume_uuid: [u8; 16] = container_kb[48..64].try_into().expect("16 bytes");
+        assert!(
+            unlock_volume(&img, &volume_uuid, "apfs-WRONG").is_err(),
+            "a wrong password must be refused, never answered with a key"
+        );
+    }
 }
