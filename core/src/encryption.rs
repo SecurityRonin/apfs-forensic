@@ -621,6 +621,23 @@ pub fn unlock_volume(
     })
 }
 
+/// Decrypt a keybag area read from an arbitrary offset, without the image.
+///
+/// The rest of this module takes the whole image as one `&[u8]`, which is fine
+/// for a 128 MB fixture and impossible for a 2 TB disk. The unwrap chain only
+/// ever reads about 12 KB of an image — the superblock and two keybag blocks —
+/// so the whole-image parameter expressed an assumption, not a requirement.
+///
+/// This is the entry point a caller uses when it can seek: hand it the
+/// ciphertext it read, the UUID keying it (container UUID for the container
+/// keybag, volume UUID for a volume keybag), and the absolute sector index the
+/// area starts at. The sector index is not derivable from `ct` and is part of
+/// the XTS tweak, so an offset error yields noise rather than a wrong-looking
+/// success.
+pub fn decrypt_keybag_area(_ct: &[u8], _uuid: &[u8; 16], _first_sector: usize) -> Vec<u8> {
+    Vec::new()
+}
+
 /// AES-128-XTS decrypt an area keyed by `uuid` (both XTS keys).
 fn xts_decrypt_area(ct: &[u8], uuid: &[u8; 16], first_sector: usize) -> Vec<u8> {
     use aes::cipher::KeyInit;
@@ -1049,6 +1066,77 @@ mod tests {
         assert!(
             unlock_volume(&img, &FIXTURE_VOLUME_UUID, "not-the-password").is_err(),
             "a wrong password must fail the integrity check, never return a key"
+        );
+    }
+
+    /// RED: the ranged entry point must recover EXACTLY what the whole-image
+    /// path recovers.
+    ///
+    /// Why this matters beyond tidiness: every other entry point here demands
+    /// the entire image as one slice. A 2 TB acquisition cannot be handed to
+    /// one, so the code is untestable against real evidence — the defect a
+    /// fixture-only suite structurally cannot see, because the fixture fits in
+    /// RAM. Asserting byte equality against the path it replaces is what makes
+    /// the ranged read trustworthy rather than merely convenient.
+    #[test]
+    fn keybag_area_decrypts_identically_from_a_ranged_read() {
+        let img = fixture_image();
+
+        // Exactly the fields a seeking caller reads out of the superblock.
+        let block_size = crate::bytes::le_u32(&img, NX_BLOCK_SIZE) as usize;
+        let paddr = crate::bytes::le_u64(&img, NX_KEYBAG_BLOCK) as usize;
+        let blocks = crate::bytes::le_u64(&img, NX_KEYBAG_BLOCKS) as usize;
+        let uuid: [u8; 16] = img[NX_CONTAINER_UUID..NX_CONTAINER_UUID + 16]
+            .try_into()
+            .expect("16 bytes");
+
+        let start = paddr * block_size;
+        let end = start + blocks * block_size;
+
+        // Only the keybag blocks — what a ranged file read would return.
+        let ranged = decrypt_keybag_area(&img[start..end], &uuid, start / KEYBAG_SECTOR);
+        let whole = decrypt_container_keybag(&img).expect("whole-image path must decrypt");
+
+        assert_eq!(
+            ranged, whole,
+            "a ranged read must decrypt to the same bytes as the whole-image path"
+        );
+        // `o_type` is a u32 CONSTANT, not a char array: the value spells "keys"
+        // read big-endian, so on disk it lands byte-reversed as "syek". Taking
+        // the module comment literally would assert b"keys" and never pass.
+        assert_eq!(
+            ranged.get(24..28),
+            Some(&b"syek"[..]),
+            "and those bytes must be a container keybag, not noise"
+        );
+    }
+
+    /// RED: the absolute sector index is part of the XTS tweak and cannot be
+    /// derived from the ciphertext. A caller that computes it wrongly must get
+    /// noise, not a plausible-looking keybag — otherwise an offset bug reads as
+    /// a decryption failure and gets misattributed to the password.
+    #[test]
+    fn keybag_area_with_a_wrong_sector_index_yields_noise() {
+        let img = fixture_image();
+        let block_size = crate::bytes::le_u32(&img, NX_BLOCK_SIZE) as usize;
+        let paddr = crate::bytes::le_u64(&img, NX_KEYBAG_BLOCK) as usize;
+        let blocks = crate::bytes::le_u64(&img, NX_KEYBAG_BLOCKS) as usize;
+        let uuid: [u8; 16] = img[NX_CONTAINER_UUID..NX_CONTAINER_UUID + 16]
+            .try_into()
+            .expect("16 bytes");
+        let start = paddr * block_size;
+        let end = start + blocks * block_size;
+
+        let wrong = decrypt_keybag_area(&img[start..end], &uuid, start / KEYBAG_SECTOR + 1);
+        assert_eq!(
+            wrong.len(),
+            end - start,
+            "a decrypted area must be the same length as its ciphertext"
+        );
+        assert_ne!(
+            wrong.get(24..28),
+            Some(&b"syek"[..]),
+            "a wrong sector index must not still produce a valid keybag magic"
         );
     }
 }
