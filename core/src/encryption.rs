@@ -1913,4 +1913,100 @@ mod tests {
             "the 0x82 length must have been walked, got {e:?}"
         );
     }
+
+    /// TIER 1: a symlink target reads through DECRYPTION.
+    ///
+    /// APFS stores a symlink's target in the embedded `com.apple.fs.symlink`
+    /// xattr, so this exercises the embedded-xattr path on a volume where every
+    /// tree node had to be decrypted first — different code from reading a file
+    /// extent, and not covered by the plaintext suite.
+    ///
+    /// dfVFS pins the linked entry's name as `a_file` in
+    /// `APFSFileEntryTestEncrypted.testGetLinkedFileEntry`.
+    ///
+    /// The two dfVFS images are NOT built alike, and assuming they were cost a
+    /// red here. Measured contents of the encrypted one:
+    ///
+    /// ```text
+    /// /              .fseventsd(16) a_directory(18) passwords.txt(19) a_link(22)
+    /// /a_directory   a_file(20) another_file(21)
+    /// xattrs         none on either file
+    /// ```
+    ///
+    /// So it carries **no `myxattr` and no `a_resourcefork`** — the plaintext
+    /// image has both, and `a_link` points at `another_file` there but `a_file`
+    /// here. Those two read paths are therefore Tier 1 on plaintext only
+    /// (`core/tests/dfvfs_tier1.rs`); claiming them here would assert against a
+    /// corpus that does not contain them.
+    #[test]
+    fn tier1_symlink_target_reads_through_decryption() {
+        let img = dfvfs_container();
+        let block_size = crate::bytes::le_u32(&img, NX_BLOCK_SIZE) as usize;
+        let container_kb = decrypt_container_keybag(&img).expect("container keybag decrypts");
+        let volume_uuid: [u8; 16] = container_kb[48..64].try_into().expect("16 bytes");
+        let vek: [u8; 32] = unlock_volume(&img, &volume_uuid, "apfs-TEST")
+            .expect("dfVFS's password unlocks dfVFS's image")
+            .vek
+            .as_slice()
+            .try_into()
+            .expect("VEK is 32 bytes");
+
+        let mut cur = std::io::Cursor::new(&img[..]);
+        let (_, mut vol) = fs_tree_root(&img, &mut cur, block_size);
+        vol.set_vek(vek);
+
+        let link =
+            crate::dir::open_path(&mut cur, &vol, "a_link", block_size).expect("a_link resolves");
+        assert_eq!(
+            link.oid, 22,
+            "dfVFS pins a_link's inode at 22 on this image"
+        );
+
+        let target = crate::xattr::symlink_target(&mut cur, &vol, link.oid, block_size)
+            .expect("symlink target reads")
+            .expect("a_link is a symlink and must have a target");
+        assert_eq!(
+            target, "a_directory/a_file",
+            "dfVFS pins the linked entry's name as a_file on the ENCRYPTED image \
+             (it is another_file on the plaintext one)"
+        );
+    }
+
+    /// The encrypted corpus is smaller than the plaintext one, and this pins
+    /// that fact so a future test cannot quietly assume parity again.
+    ///
+    /// Guarding the corpus rather than the code: if dfVFS ever ships an
+    /// encrypted image carrying xattrs or a resource fork, this fails and says
+    /// to go and claim those paths at Tier 1 here too.
+    #[test]
+    fn the_encrypted_corpus_carries_no_xattrs_or_resource_fork() {
+        let img = dfvfs_container();
+        let block_size = crate::bytes::le_u32(&img, NX_BLOCK_SIZE) as usize;
+        let container_kb = decrypt_container_keybag(&img).expect("container keybag decrypts");
+        let volume_uuid: [u8; 16] = container_kb[48..64].try_into().expect("16 bytes");
+        let vek: [u8; 32] = unlock_volume(&img, &volume_uuid, "apfs-TEST")
+            .expect("unlocks")
+            .vek
+            .as_slice()
+            .try_into()
+            .expect("VEK is 32 bytes");
+
+        let mut cur = std::io::Cursor::new(&img[..]);
+        let (_, mut vol) = fs_tree_root(&img, &mut cur, block_size);
+        vol.set_vek(vek);
+
+        let dir = crate::dir::open_path(&mut cur, &vol, "a_directory", block_size)
+            .expect("a_directory resolves");
+        let mut names: Vec<String> = crate::dir::list_dir(&mut cur, &vol, dir.oid, block_size)
+            .expect("lists")
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["a_file", "another_file"],
+            "no a_resourcefork here, unlike the plaintext image"
+        );
+    }
 }

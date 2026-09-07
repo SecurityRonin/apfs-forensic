@@ -141,3 +141,31 @@ gzip -9 -c apfs_encrypted.dmg > dfvfs-apfs-encrypted.dmg.gz
 
 The container does not start at offset 0: it is partition 1 of a GPT disk,
 beginning at byte 20480. The test slices there.
+
+
+### The two dfVFS images are NOT built alike
+
+Assuming parity between `apfs.raw` and `apfs_encrypted.dmg` cost a red. Measured
+contents of the encrypted one:
+
+```text
+/              .fseventsd(16)  a_directory(18)  passwords.txt(19)  a_link(22)
+/a_directory   a_file(20)  another_file(21)
+xattrs         none on either file
+a_link ->      a_directory/a_file
+```
+
+Against the plaintext image, which has `a_resourcefork`, a `myxattr` extended
+attribute, and an `a_link` pointing at `another_file` instead. Different inode
+numbers throughout.
+
+So extended attributes and resource forks are Tier 1 on the **plaintext** corpus
+only (`core/tests/dfvfs_tier1.rs`) — the encrypted image does not contain them,
+and asserting them here would be asserting against a corpus that has nothing to
+say. Symlink targets ARE validated through decryption, which matters because
+APFS stores them in an embedded `com.apple.fs.symlink` xattr, so that path is
+exercised on ciphertext.
+
+`the_encrypted_corpus_carries_no_xattrs_or_resource_fork` pins this. It guards
+the corpus, not the code: if dfVFS ever ships an encrypted image carrying them,
+it fails and says to come and claim those paths here too.
