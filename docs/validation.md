@@ -444,6 +444,15 @@ fabricating one would be dishonest. They were instead shown capable of failing:
 corrupting extent assembly, truncating an xattr value, and dropping a directory
 entry each turn them red.
 
+**Corpus asymmetry (do not assume parity).** dfVFS's two APFS images are built
+differently: the plaintext one carries a resource fork, a `myxattr` extended
+attribute, and a symlink to `another_file`; the encrypted one has none of the
+first two and links to `a_file`, with different inode numbers throughout.
+Extended attributes and resource forks are therefore Tier 1 on **plaintext
+only**. Symlink targets are validated on both, which matters because APFS stores
+them in an embedded xattr — so that path is exercised through decryption as
+well.
+
 **Scope.** Tier 1 here covers the read paths the dfVFS corpus exercises.
 Snapshots (P5), the space manager (P6) and sealed volumes are untouched by it
 and remain at their existing tiers — a third-party corpus raises what it
