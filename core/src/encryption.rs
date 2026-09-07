@@ -291,6 +291,29 @@ pub fn derive_key_from_password(
     out
 }
 
+/// Decrypt the container keybag referenced by the container superblock's
+/// `nx_keylocker`.
+///
+/// # Errors
+/// [`crate::ApfsError::FieldOutOfRange`] if the superblock or keylocker extent
+/// is malformed.
+pub fn decrypt_container_keybag(image: &[u8]) -> crate::Result<Vec<u8>> {
+    // RED stub
+    let _ = image;
+    Ok(vec![0u8; 64])
+}
+
+/// As [`decrypt_container_keybag`] but with an explicit key, so a test can prove
+/// a WRONG key fails to produce a parseable keybag.
+///
+/// # Errors
+/// Same as [`decrypt_container_keybag`].
+pub fn decrypt_container_keybag_with_uuid(image: &[u8], uuid: &[u8; 16]) -> crate::Result<Vec<u8>> {
+    // RED stub
+    let _ = (image, uuid);
+    Ok(vec![0u8; 64])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,6 +545,69 @@ mod tests {
             got.as_slice(),
             expected.as_slice(),
             "RFC 7914 s11 PBKDF2-SHA256 c=80000"
+        );
+    }
+
+    /// Load the committed fixture: a real macOS-minted APFS-native encrypted
+    /// volume. Gzipped so CI validates from committed bytes with no download.
+    #[cfg(test)]
+    fn fixture_image() -> Vec<u8> {
+        use std::io::Read as _;
+        let gz = include_bytes!("../../tests/data/filevault/apfs-native-filevault.raw.gz");
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(&gz[..])
+            .read_to_end(&mut out)
+            .expect("fixture must decompress");
+        out
+    }
+
+    /// RED: the container keybag is stored AES-128-XTS encrypted, keyed by the
+    /// container UUID (both XTS keys), tweaked by sector number. Decrypting it
+    /// must yield a PARSEABLE keybag — not noise.
+    ///
+    /// Asserts on structure recovered from real Apple-written bytes, so a
+    /// wrong key or tweak cannot pass: garbage does not parse into known tags.
+    #[test]
+    fn container_keybag_decrypts_to_a_parseable_keybag() {
+        let img = fixture_image();
+        let sb = &img[..4096];
+        assert_eq!(
+            &sb[32..36],
+            b"NXSB",
+            "fixture must start with a container superblock"
+        );
+
+        let kb = decrypt_container_keybag(&img).expect("container keybag must decrypt");
+        let state = read_keybag(&kb).expect("decrypted keybag must parse");
+
+        // A real container keybag names the per-volume key and unlock records.
+        assert!(
+            state.tags_present.contains(&KeybagTag::VolumeKey)
+                || state.tags_present.contains(&KeybagTag::VolumeUnlockRecords),
+            "decrypted container keybag must carry VolumeKey or VolumeUnlockRecords, got {:?}",
+            state.tags_present
+        );
+    }
+
+    /// RED: a wrong key must NOT yield something that parses as a keybag.
+    /// Without this, "it parsed" could be an artifact of a permissive parser
+    /// rather than evidence the decryption was correct.
+    #[test]
+    fn container_keybag_with_a_wrong_uuid_does_not_parse_as_a_keybag() {
+        let img = fixture_image();
+        let kb = decrypt_container_keybag_with_uuid(&img, &[0xAA; 16])
+            .expect("decryption itself should run; only the RESULT must be wrong");
+        let parsed = read_keybag(&kb);
+        let bogus = match parsed {
+            Err(_) => true,
+            Ok(s) => {
+                !s.tags_present.contains(&KeybagTag::VolumeKey)
+                    && !s.tags_present.contains(&KeybagTag::VolumeUnlockRecords)
+            }
+        };
+        assert!(
+            bogus,
+            "a wrong UUID must not produce a keybag carrying real volume tags"
         );
     }
 }
