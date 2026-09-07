@@ -19,10 +19,16 @@ use apfs_forensic::AnomalyKind;
 /// `ke_keylen`@18). Mirrors the builder in `core/src/encryption.rs` tests so the
 /// forensic `crypto::audit` runs over a real `read_keybag`-parsed state.
 fn keybag(entries: &[(u16, usize)]) -> Vec<u8> {
+    // A real keybag block is an APFS object: a 32-byte obj_phys header (magic in
+    // o_type at +24) precedes the kb_locker. Building without it produced a
+    // fixture only this parser understood -- the same wrong assumption the core
+    // tests carried, in a fourth copy.
+    const OBJ_PHYS: usize = 32;
     let mut data = vec![0u8; 4096];
-    data[0..2].copy_from_slice(&1u16.to_le_bytes());
-    data[2..4].copy_from_slice(&(entries.len() as u16).to_le_bytes());
-    let mut off = 16usize;
+    data[24..28].copy_from_slice(b"keys"); // o_type
+    data[OBJ_PHYS..OBJ_PHYS + 2].copy_from_slice(&1u16.to_le_bytes());
+    data[OBJ_PHYS + 2..OBJ_PHYS + 4].copy_from_slice(&(entries.len() as u16).to_le_bytes());
+    let mut off = OBJ_PHYS + 16;
     let mut nbytes = 16u32;
     for &(tag, keylen) in entries {
         let mut e = vec![0u8; (24 + keylen + 15) & !15];
