@@ -91,6 +91,12 @@ pub struct ApfsVolume {
     uuid: [u8; 16],
     fs_flags: u64,
     name: String,
+    /// Volume encryption key, once a password has unlocked it.
+    ///
+    /// Lives on the volume because every read path already receives one, so an
+    /// encrypted volume becomes readable without changing a single public
+    /// signature -- callers that never touch encryption are unaffected.
+    vek: Option<[u8; 32]>,
 }
 
 impl ApfsVolume {
@@ -150,6 +156,7 @@ impl ApfsVolume {
             uuid: crate::bytes::arr::<16>(block, OFF_VOL_UUID),
             fs_flags: crate::bytes::le_u64(block, OFF_FS_FLAGS),
             name,
+            vek: None,
         })
     }
 
@@ -197,6 +204,21 @@ impl ApfsVolume {
     #[must_use]
     pub fn root_tree_type(&self) -> u32 {
         self.root_tree_type
+    }
+
+    /// Supply the volume encryption key recovered from a password.
+    ///
+    /// With it set, B-tree nodes flagged `OMAP_VAL_ENCRYPTED` and file extents
+    /// are decrypted transparently on read; without it an encrypted volume
+    /// fails its checksum rather than returning plausible garbage.
+    pub fn set_vek(&mut self, vek: [u8; 32]) {
+        self.vek = Some(vek);
+    }
+
+    /// The volume encryption key, if one has been supplied.
+    #[must_use]
+    pub fn vek(&self) -> Option<&[u8; 32]> {
+        self.vek.as_ref()
     }
 
     /// `apfs_omap_oid` — the block address of this volume's object map

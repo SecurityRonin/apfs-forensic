@@ -1,8 +1,9 @@
 # Validation
 
-> **Status: phases P1–P5 validated (Tier 2).** Results are recorded here as each
-> phase lands; later phases (spaceman, encryption, sealed) are still in progress.
-> Claims below are scoped to the validated capabilities and tiered.
+> **Status: P1–P6 validated (Tier 2); P7 FileVault unwrap chain and P8
+> encrypted-volume file reading validated (Tier 1).** Results are recorded here
+> as each phase lands; sealed volumes are still in progress. Claims below are
+> scoped to the validated capabilities and tiered.
 
 ## How to read the evidence tiers
 
@@ -326,3 +327,94 @@ decode these fields. The independent free-count cross-check above (345 from the
 bitmap == 345 from the spaceman accounting) is what raises this to Tier 2 on our
 real fixture. The populated reap-list walk is Tier 3 (no committed fixture has a
 queued reaper; a real deleted-volume image would lift it).
+
+### FileVault unwrap chain: password → KEK → VEK (P7) — Tier 1 (chain only)
+
+**What P7 does.** Recovers a volume encryption key from an APFS-native encrypted
+volume given its password: container keybag (AES-128-XTS, keyed on the container
+UUID, tweaked by absolute sector) → per-volume records → volume keybag (same
+scheme, keyed on the *volume* UUID) → wrapped-KEK object (BER TLV: `0x83`
+wrapped key, `0x84` iterations, `0x85` salt) → PBKDF2-HMAC-SHA256 → AES key
+unwrap (RFC 3394) for the KEK, then again for the VEK.
+
+**Why this reaches Tier 1 where the fixture alone does not.** The committed
+fixture is Tier 2: real Apple-written bytes, but we chose the scenario and set
+the password, so a test against it grades our own homework. The Tier-1 claim
+rests on a different artifact entirely — an examiner's **real-world encrypted
+external disk**, minted by macOS on hardware we never touched, carrying a
+password never disclosed to the implementation's author, acquired independently
+with `ddrescue`. Identifiers are case material and are recorded outside this
+repository.
+
+**The oracle is cryptographic, not a comparison.** Nothing here is checked by
+diffing against our own expectation. RFC 3394 key unwrap carries a 64-bit
+integrity check value and fails closed, and the chain must pass it **twice** —
+password→KEK, then KEK→VEK. A wrong salt, iteration count, TLV parse, XTS tweak,
+or UUID keying yields bytes that cannot satisfy it. The check was written into
+the artifact by Apple and is implemented by `aes-kw`, so the confirming authority
+is independent of this codebase in both directions.
+
+| Claim | Evidence | Oracle / tier |
+|---|---|---|
+| the chain recovers a volume key from a real-world encrypted disk | the examiner's own password produced `UNLOCKED`, 32-byte key, on a real acquired image | RFC 3394 ICV, twice (**Tier 1**) |
+| a wrong password is refused, never answered with bytes | same image, deliberately wrong password: `REFUSED` at 1/1 volumes, structures intact | RFC 3394 ICV (**Tier 1**) |
+| the same chain works on committed bytes in CI | fixture unlocks with its recorded password; wrong password refused | fixture (**Tier 2**) |
+| a non-APFS input is rejected loudly, not answered | a file of zeros exits 2 with "no NXSB container superblock" | construction |
+| the chain is usable on real evidence at all | 12,288 bytes read (one superblock, two keybag areas) from a 2 TB image | measured (**Tier 1**) |
+| VEK value stability across refactors | pinned SHA-256 of the fixture's VEK | regression pin (**Tier 3** — see flag) |
+
+**Superseded:** an earlier revision of this section flagged that Tier 1 covered
+the unwrap chain only, because AES-XTS decryption of volume blocks was not
+implemented. It now is, and is validated at Tier 1 in P8 below.
+
+The pinned VEK fingerprint is explicitly **Tier 3**: it pins the current
+implementation's output and proves the answer stopped changing, never that it was
+right. Its value was demonstrated rather than assumed — a mutation returning a
+constant key left the two-path equality assertion green, and only the pin caught
+it. The Tier-1 real-world unlock is what carries the correctness claim; the pin
+guards against silent drift.
+
+
+### Encrypted volume file reading: tree nodes + extents (P8) — Tier 1
+
+**What P8 does.** Decrypts the two datasets APFS protects with the VEK: B-tree
+nodes (tweak = the node's own `ov_paddr`, applied only when the omap entry
+carries `OMAP_VAL_ENCRYPTED`) and file extents (tweak = `crypto_id + block
+index`, stored in `j_file_extent_val_t` because APFS may relocate an extent
+without re-encrypting it). AES-128-XTS over 512-byte sectors, VEK split as data
+key `||` tweak key. Nodes are decrypted **before** the Fletcher-64 check, since
+that checksum covers plaintext.
+
+**The corpus is not ours, and that is the whole point.** Every self-minted
+fixture is capped at Tier 2 by construction: a marker we wrote, on a volume we
+encrypted, with a password we chose, is ground truth we authored. The Tier-1
+claim rests on `dfvfs-apfs-encrypted.dmg` — third party artifact, third party
+password (`apfs-TEST`), third party expected tree, inode numbers and file
+contents. See `tests/data/filevault/README.md` for the full provenance table.
+
+| Claim | Evidence | Oracle / tier |
+|---|---|---|
+| directory tree reads correctly off an encrypted volume | root lists `.fseventsd`, `a_directory`, `a_link`, `passwords.txt` | dfVFS `expected_sub_file_entry_names` (**Tier 1**) |
+| the right inode is resolved through the encrypted tree | `/a_directory/another_file` → inode 21 | dfVFS `APFSFileEntryTestEncrypted` (**Tier 1**) |
+| file contents decrypt byte-exactly | bytes equal `This is another file.\n` | dfVFS generator + their committed `test_data/another_file` (**Tier 1**) |
+| a second file decrypts, so one lucky extent cannot carry the claim | `passwords.txt` begins `place,user,password` | the same generator heredoc (**Tier 1**) |
+| the image is genuinely encrypted | no answer-key filename appears in the raw bytes | construction |
+| a wrong password is refused on the third-party image | `apfs-WRONG` fails AES-KW | RFC 3394 ICV (**Tier 1**) |
+| the self-minted fixture also reads back | its marker decrypts byte-for-byte | our own ground truth (**Tier 2**) |
+
+**Controls, reported as they ran.** Corrupting the node tweak turns the Tier-1
+test red; corrupting the extent tweak turns it red **only after** the assertion
+was changed from size to bytes — pinning `len() == 22` let a corrupted extent
+tweak pass, because decryption cannot change a file's length. That near-miss is
+the reason the byte-exact form is the one that ships.
+
+`the_same_file_is_unreadable_without_the_key` is **not** claimed as a passing
+control: two mutations (a bogus key, and disabling the checksum guard) both left
+it green, because refusing is the natural outcome of nearly any breakage here.
+It stands as a regression guard against a future change that returns data for a
+locked volume, not as evidence that one cannot.
+
+**Still open.** Not validated against a volume paused mid-conversion, and not
+against a volume converted from CoreStorage — apfs-fuse notes that block id and
+XTS id diverge on exactly those, so it is a known unknown rather than an
+assumption of correctness.

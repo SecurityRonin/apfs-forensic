@@ -21,6 +21,15 @@ name = "apfs_core"
 path = "src/lib.rs"
 
 [dependencies]
+# FileVault unwrap chain. NEVER hand-rolled: these are the audited RustCrypto
+# crates, at the versions already proven against a real volume in
+# filevault-forensic (which does the CoreStorage/FVDE equivalent).
+pbkdf2 = { version = "0.12", default-features = false }
+hmac = "0.12"
+aes = "0.8"
+aes-kw = { version = "0.2", features = ["alloc"] }
+xts-mode = "0.5"
+sha2 = { workspace = true }
 forensicnomicon = { workspace = true }   # magics / type codes / decmpfs map (KNOWLEDGE)
 thiserror = { workspace = true }
 bitflags = { workspace = true }
