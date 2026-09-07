@@ -635,6 +635,45 @@ pub fn unlock_with_volume_keybag(
     })
 }
 
+/// Number of `OMAP_VAL_ENCRYPTED` in `omap_val_t.ov_flags`: the object this
+/// mapping points at is stored encrypted under the volume key.
+pub const OMAP_VAL_ENCRYPTED: u32 = 0x0000_0004;
+
+/// The AES-XTS sector size APFS encrypts in, 512 bytes even on 4 KB-block media.
+pub const APFS_CRYPTO_SECTOR: usize = 0x200;
+
+/// Decrypt volume data (a B-tree node or file extent) in place with the VEK.
+///
+/// `tweak_block` is in BLOCK units and is what the format stores, not a byte
+/// offset: `ov_paddr` for a B-tree node, `crypto_id + block_index` for a file
+/// extent. It is scaled to 512-byte sectors here and incremented per sector, so
+/// a caller never does that arithmetic and cannot get it half-right.
+///
+/// Why the tweak is *stored* for extents rather than derived from position:
+/// APFS may relocate an extent without re-encrypting it, so its position stops
+/// predicting its tweak. That is the entire reason `crypto_id` exists.
+///
+/// A `tweak_block` of 0 means the data is not encrypted and is left untouched,
+/// matching the reference implementation's sentinel.
+///
+/// The 32-byte VEK is two AES-128 keys: the first 16 bytes encrypt the data,
+/// the last 16 encrypt the tweak.
+pub fn decrypt_volume_area(data: &mut [u8], vek: &[u8; 32], tweak_block: u64, block_size: usize) {
+    if tweak_block == 0 || block_size < APFS_CRYPTO_SECTOR {
+        return;
+    }
+    use aes::cipher::KeyInit;
+    use xts_mode::{get_tweak_default, Xts128};
+
+    let (k1, k2) = vek.split_at(16);
+    let (Ok(k1), Ok(k2)) = (<&[u8; 16]>::try_from(k1), <&[u8; 16]>::try_from(k2)) else {
+        return; // cov:unreachable: a 32-byte array always splits into two 16s
+    };
+    let _ = (Xts128::<aes::Aes128>::new, get_tweak_default, k1, k2);
+    let _ = APFS_CRYPTO_SECTOR;
+    // RED stub: leaves the ciphertext untouched.
+}
+
 /// Decrypt a keybag area read from an arbitrary offset, without the image.
 ///
 /// The rest of this module takes the whole image as one `&[u8]`, which is fine
@@ -1254,5 +1293,110 @@ mod tests {
             Some(&b"syek"[..]),
             "a wrong sector index must not still produce a valid keybag magic"
         );
+    }
+
+    /// RED: the filesystem tree of an encrypted volume is itself ciphertext.
+    /// Decrypting its root node with the VEK must produce a node whose stored
+    /// Fletcher-64 checksum verifies.
+    ///
+    /// The checksum is the oracle and it is why this test cannot pass by
+    /// accident: it is computed over PLAINTEXT and stored inside the block, so
+    /// a wrong key, wrong key split, wrong tweak, or wrong sector size yields
+    /// bytes whose checksum cannot match. Apple wrote the expected value into
+    /// the block; nothing here compares against our own expectation.
+    #[test]
+    fn the_encrypted_fs_tree_root_decrypts_to_a_checksum_valid_node() {
+        let img = fixture_image();
+        let vek_v = unlock_volume(&img, &FIXTURE_VOLUME_UUID, "apfs-FV-TEST-2026")
+            .expect("fixture must unlock")
+            .vek;
+        let vek: [u8; 32] = vek_v.as_slice().try_into().expect("VEK is 32 bytes");
+
+        let block_size = crate::bytes::le_u32(&img, NX_BLOCK_SIZE) as usize;
+        let mut cur = std::io::Cursor::new(&img[..]);
+
+        // Locate the volume superblock (APSB is plaintext) and its object map.
+        let (entry, _vol) = fs_tree_root(&img, &mut cur, block_size);
+
+        assert_ne!(
+            entry.flags & OMAP_VAL_ENCRYPTED,
+            0,
+            "the fixture's fs-tree root must be flagged encrypted, else this test proves nothing"
+        );
+
+        let mut node = read_block_at(&img, entry.paddr, block_size);
+        assert_ne!(
+            crate::object::fletcher64_checksum(&node),
+            crate::object::fletcher64_stored(&node),
+            "ciphertext must NOT already checksum, or the block was never encrypted"
+        );
+
+        decrypt_volume_area(&mut node, &vek, entry.paddr, block_size);
+
+        assert_eq!(
+            crate::object::fletcher64_checksum(&node),
+            crate::object::fletcher64_stored(&node),
+            "the decrypted fs-tree root must pass its own Fletcher-64 checksum"
+        );
+        assert!(
+            crate::btree::parse_node_header(&node).is_some(),
+            "and must parse as a B-tree node"
+        );
+    }
+
+    /// RED: a WRONG key must not produce a checksum-valid node. Without this,
+    /// "it checksummed" could be an artifact of a permissive check rather than
+    /// evidence the decryption was right.
+    #[test]
+    fn a_wrong_vek_does_not_produce_a_checksum_valid_node() {
+        let img = fixture_image();
+        let block_size = crate::bytes::le_u32(&img, NX_BLOCK_SIZE) as usize;
+        let mut cur = std::io::Cursor::new(&img[..]);
+        let (entry, _vol) = fs_tree_root(&img, &mut cur, block_size);
+
+        let mut node = read_block_at(&img, entry.paddr, block_size);
+        decrypt_volume_area(&mut node, &[0xAB; 32], entry.paddr, block_size);
+        assert_ne!(
+            crate::object::fletcher64_checksum(&node),
+            crate::object::fletcher64_stored(&node),
+            "a wrong VEK must not yield a checksum-valid node"
+        );
+    }
+
+
+    /// Resolve the fixture's volume and its filesystem-tree root omap entry.
+    ///
+    /// The container superblock, the object maps and the APSB are all plaintext
+    /// -- APFS encrypts volume CONTENTS, not the container metadata that finds
+    /// them -- so this whole descent works without the key.
+    #[cfg(test)]
+    fn fs_tree_root(
+        img: &[u8],
+        cur: &mut std::io::Cursor<&[u8]>,
+        block_size: usize,
+    ) -> (crate::omap::OmapEntry, crate::volume::ApfsVolume) {
+        let nx = crate::container::NxSuperblock::parse(&img[..block_size])
+            .expect("container superblock parses");
+        let nx_omap = crate::omap::ObjectMap::parse(&read_block_at(img, nx.omap_oid, block_size))
+            .expect("container omap parses");
+        let fs_oid = *nx.fs_oids.first().expect("at least one volume");
+        let vol_entry = nx_omap
+            .resolve(cur, fs_oid, u64::MAX, block_size)
+            .expect("volume oid resolves");
+        let vol = crate::volume::ApfsVolume::parse(&read_block_at(img, vol_entry.paddr, block_size))
+            .expect("APSB parses (it is plaintext)");
+        let vol_omap = crate::omap::ObjectMap::parse(&read_block_at(img, vol.omap_oid(), block_size))
+            .expect("volume omap parses");
+        let entry = vol_omap
+            .resolve(cur, vol.root_tree_oid(), u64::MAX, block_size)
+            .expect("fs-tree root resolves");
+        (entry, vol)
+    }
+
+    /// Read one block by physical address.
+    #[cfg(test)]
+    fn read_block_at(img: &[u8], paddr: u64, block_size: usize) -> Vec<u8> {
+        let start = paddr as usize * block_size;
+        img[start..start + block_size].to_vec()
     }
 }
