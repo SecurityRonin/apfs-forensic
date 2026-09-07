@@ -1,7 +1,8 @@
 # Validation
 
-> **Status: P1–P6 validated (Tier 2); P7 FileVault unwrap chain and P8
-> encrypted-volume file reading validated (Tier 1).** Results are recorded here
+> **Status: P7 FileVault unwrap, P8 encrypted-volume file reading, and P9 core
+> read paths validated at Tier 1; P5–P6 (snapshots, space manager) remain
+> Tier 2.** Results are recorded here
 > as each phase lands; sealed volumes are still in progress. Claims below are
 > scoped to the validated capabilities and tiered.
 
@@ -418,3 +419,32 @@ locked volume, not as evidence that one cannot.
 against a volume converted from CoreStorage — apfs-fuse notes that block id and
 XTS id diverge on exactly those, so it is a known unknown rather than an
 assumption of correctness.
+
+
+### Core reader against a third-party corpus (P9) — Tier 1
+
+**What changed.** P2–P6 were validated only against fixtures this project
+minted. That caps them at Tier 2 by construction: the decoder and the answer key
+share an author, so they share his blind spots. dfVFS's `apfs.raw` supplies both
+an artifact and an answer key we did not write, which lifts the core read paths
+without altering a line of decoder.
+
+| Claim | Evidence | Oracle / tier |
+|---|---|---|
+| directory listing | root = `.fseventsd`, `a_directory`, `a_link`, `passwords.txt` | dfVFS `expected_sub_file_entry_names` (**Tier 1**) |
+| nested listing | `a_directory` holds exactly `a_file`, `a_resourcefork`, `another_file` | dfVFS `number_of_sub_file_entries` + generator (**Tier 1**) |
+| path → inode | `a_directory` 16, `a_file` 17, `another_file` 19, `a_link` 20 | dfVFS `APFSFileEntryTest._IDENTIFIER_*` (**Tier 1**) |
+| file byte assembly | two files match their generator heredocs byte-for-byte | dfVFS generator (**Tier 1**) |
+| extended attributes | `myxattr` = `My extended attribute` | dfVFS asserts name and value (**Tier 1**) |
+| symlink targets | `a_link` → `a_directory/another_file` | the generator's `ln -s` (**Tier 1**) |
+| resource forks | `a_resourcefork` fork = `My resource fork\n` | the generator's `..namedfork/rsrc` write (**Tier 1**) |
+
+**Controls.** These validate existing behaviour, so there is no RED and
+fabricating one would be dishonest. They were instead shown capable of failing:
+corrupting extent assembly, truncating an xattr value, and dropping a directory
+entry each turn them red.
+
+**Scope.** Tier 1 here covers the read paths the dfVFS corpus exercises.
+Snapshots (P5), the space manager (P6) and sealed volumes are untouched by it
+and remain at their existing tiers — a third-party corpus raises what it
+actually contains, not the repository average.
