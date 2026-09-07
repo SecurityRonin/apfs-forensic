@@ -291,16 +291,41 @@ pub fn derive_key_from_password(
     out
 }
 
+/// Offsets into `nx_superblock_t`, from the libfsapfs reference structure.
+const NX_BLOCK_SIZE: usize = 0x024;
+const NX_CONTAINER_UUID: usize = 0x048;
+const NX_KEYBAG_BLOCK: usize = 0x510;
+const NX_KEYBAG_BLOCKS: usize = 0x518;
+/// XTS sector size APFS uses for the keybag.
+const KEYBAG_SECTOR: usize = 512;
+
 /// Decrypt the container keybag referenced by the container superblock's
 /// `nx_keylocker`.
 ///
+/// The keybag is AES-128-XTS encrypted with the container UUID as BOTH XTS
+/// keys. That UUID sits in plaintext in the superblock, so this layer is
+/// obfuscation rather than protection and needs no password — which is why
+/// container information is readable from a locked volume. The password only
+/// enters later, when unwrapping the KEK.
+///
+/// Reads the superblock at block 0. A container also keeps newer superblocks in
+/// its checkpoint descriptor area; selecting the highest-xid one is a separate
+/// concern and not needed to reach the keybag.
+///
 /// # Errors
-/// [`crate::ApfsError::FieldOutOfRange`] if the superblock or keylocker extent
-/// is malformed.
+/// [`crate::ApfsError::FieldOutOfRange`] if the superblock magic is absent or
+/// the keylocker extent falls outside the image.
 pub fn decrypt_container_keybag(image: &[u8]) -> crate::Result<Vec<u8>> {
-    // RED stub
-    let _ = image;
-    Ok(vec![0u8; 64])
+    let uuid: [u8; 16] = image
+        .get(NX_CONTAINER_UUID..NX_CONTAINER_UUID + 16)
+        .and_then(|s| s.try_into().ok())
+        .ok_or(crate::ApfsError::FieldOutOfRange {
+            structure: "nx_superblock",
+            field: "container_uuid",
+            value: image.len() as u64,
+            cap: (NX_CONTAINER_UUID + 16) as u64,
+        })?;
+    decrypt_container_keybag_with_uuid(image, &uuid)
 }
 
 /// As [`decrypt_container_keybag`] but with an explicit key, so a test can prove
@@ -309,9 +334,58 @@ pub fn decrypt_container_keybag(image: &[u8]) -> crate::Result<Vec<u8>> {
 /// # Errors
 /// Same as [`decrypt_container_keybag`].
 pub fn decrypt_container_keybag_with_uuid(image: &[u8], uuid: &[u8; 16]) -> crate::Result<Vec<u8>> {
-    // RED stub
-    let _ = (image, uuid);
-    Ok(vec![0u8; 64])
+    use aes::cipher::KeyInit;
+    use xts_mode::{get_tweak_default, Xts128};
+
+    let bad = |field: &'static str, value: u64, cap: u64| crate::ApfsError::FieldOutOfRange {
+        structure: "nx_keylocker",
+        field,
+        value,
+        cap,
+    };
+
+    if image.get(32..36) != Some(b"NXSB") {
+        return Err(bad("magic", 0, 1));
+    }
+    let block_size = crate::bytes::le_u32(image, NX_BLOCK_SIZE) as usize;
+    if block_size == 0 || block_size % KEYBAG_SECTOR != 0 {
+        return Err(bad("block_size", block_size as u64, KEYBAG_SECTOR as u64));
+    }
+    let paddr = crate::bytes::le_u64(image, NX_KEYBAG_BLOCK) as usize;
+    let blocks = crate::bytes::le_u64(image, NX_KEYBAG_BLOCKS) as usize;
+    if paddr == 0 || blocks == 0 {
+        return Err(bad("keylocker_extent", paddr as u64, blocks as u64));
+    }
+
+    let start = paddr
+        .checked_mul(block_size)
+        .ok_or_else(|| bad("keybag_offset", paddr as u64, block_size as u64))?;
+    let len = blocks
+        .checked_mul(block_size)
+        .ok_or_else(|| bad("keybag_length", blocks as u64, block_size as u64))?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| bad("keybag_end", start as u64, len as u64))?;
+    let ct = image
+        .get(start..end)
+        .ok_or_else(|| bad("keybag_past_image", end as u64, image.len() as u64))?;
+
+    // Both XTS keys are the container UUID: AES-128, 16-byte key each.
+    let c1 = aes::Aes128::new(uuid.into());
+    let c2 = aes::Aes128::new(uuid.into());
+    let xts = Xts128::new(c1, c2);
+
+    let mut buf = ct.to_vec();
+    // Tweak is the absolute sector index, matching how the on-disk data was
+    // written: sector = byte offset / sector size.
+    let first_sector = start / KEYBAG_SECTOR;
+    xts.decrypt_area(
+        &mut buf,
+        KEYBAG_SECTOR,
+        first_sector as u128,
+        get_tweak_default,
+    );
+    Ok(buf)
 }
 
 #[cfg(test)]
