@@ -524,6 +524,27 @@ pub fn volume_records(keybag: &[u8], volume_uuid: &[u8; 16]) -> crate::Result<Vo
     })
 }
 
+/// A volume's unwrapped encryption key, recovered from a password.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct UnlockedVolume {
+    /// The volume encryption key: two AES-128-XTS keys, 32 bytes total.
+    pub vek: Vec<u8>,
+}
+
+/// Unlock a volume: password -> KEK -> VEK.
+///
+/// # Errors
+/// [`crate::ApfsError::FieldOutOfRange`] if the keybags are malformed or the
+/// password is wrong (AES-KW's integrity check refuses it).
+pub fn unlock_volume(
+    _image: &[u8],
+    _volume_uuid: &[u8; 16],
+    _password: &str,
+) -> crate::Result<UnlockedVolume> {
+    Ok(UnlockedVolume { vek: Vec::new() }) // RED stub
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -874,6 +895,31 @@ mod tests {
         assert!(
             volume_records(&kb, &[0x11; 16]).is_err(),
             "an absent volume UUID must be an error, never another volume's keys"
+        );
+    }
+
+    /// RED: the whole chain, end to end, on the real fixture with the real
+    /// password — container keybag -> volume keybag -> KEK -> VEK.
+    ///
+    /// This is the test that decides whether volume unlock actually works.
+    #[test]
+    fn unlock_volume_recovers_the_vek_with_the_correct_password() {
+        let img = fixture_image();
+        let u = unlock_volume(&img, &FIXTURE_VOLUME_UUID, "apfs-FV-TEST-2026")
+            .expect("the fixture must unlock with its recorded password");
+        assert_eq!(u.vek.len(), 32, "VEK is two AES-128-XTS keys, 32 bytes");
+        assert!(u.vek.iter().any(|&b| b != 0), "VEK must not be all zeros");
+    }
+
+    /// RED: a WRONG password must be refused by AES-KW's integrity check, never
+    /// answered with bytes. Without this a wrong password yields a wrong key and
+    /// every later failure is misattributed to a corrupt volume.
+    #[test]
+    fn unlock_volume_refuses_a_wrong_password() {
+        let img = fixture_image();
+        assert!(
+            unlock_volume(&img, &FIXTURE_VOLUME_UUID, "not-the-password").is_err(),
+            "a wrong password must fail the integrity check, never return a key"
         );
     }
 }
