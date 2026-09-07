@@ -58,8 +58,17 @@ pub struct EncryptionState {
 }
 
 // `kb_locker` header field offsets, then 16-byte-aligned `keybag_entry_t`s.
-const KL_NKEYS: usize = 2; // u16
-const KL_ENTRIES_OFF: usize = 16; // entries begin after the 16-byte header
+// A keybag block is an APFS OBJECT: a 32-byte obj_phys header (cksum, oid, xid,
+// type, subtype) precedes the kb_locker. Confirmed two ways -- the magic sits in
+// o_type at +24 ("keys" for a container bag, "recs" for a volume bag) in the real
+// fixture, and apfs-fuse's media_keybag_t carries an mk_obj member whose
+// mk_obj.o_type it validates.
+//
+// Omitting this made kl_nkeys read as 12824 (garbage); entry scanning resynced by
+// luck, which is why it appeared to work.
+const OBJ_PHYS_LEN: usize = 32;
+const KL_NKEYS: usize = OBJ_PHYS_LEN + 2; // kl_nkeys, u16
+const KL_ENTRIES_OFF: usize = OBJ_PHYS_LEN + 16; // entries follow the 16-byte kb_locker
 const KE_TAG: usize = 16; // u16 within an entry
 const KE_KEYLEN: usize = 18; // u16 within an entry
 const KE_HEADER_LEN: usize = 24; // uuid(16) + tag(2) + keylen(2) + pad(4)
@@ -534,15 +543,126 @@ pub struct UnlockedVolume {
 
 /// Unlock a volume: password -> KEK -> VEK.
 ///
+/// 1. decrypt the container keybag (AES-128-XTS, container UUID as both keys)
+/// 2. find this volume's wrapped VEK and where its own keybag lives
+/// 3. decrypt the volume keybag (same scheme, VOLUME UUID as both keys)
+/// 4. read the wrapped-KEK object: wrapped KEK, iterations, salt
+/// 5. PBKDF2-HMAC-SHA256 the password with that salt and count
+/// 6. AES-KW unwrap the KEK, then the VEK with it
+///
+/// Only step 5 uses the password. Everything before is keyed on UUIDs stored in
+/// plaintext, which is why container structure reads while a volume stays locked.
+///
 /// # Errors
-/// [`crate::ApfsError::FieldOutOfRange`] if the keybags are malformed or the
-/// password is wrong (AES-KW's integrity check refuses it).
+/// [`crate::ApfsError::FieldOutOfRange`] if a keybag is malformed, or if the
+/// password is wrong — AES-KW's integrity check refuses it rather than handing
+/// back a key that would decrypt to garbage.
 pub fn unlock_volume(
-    _image: &[u8],
-    _volume_uuid: &[u8; 16],
-    _password: &str,
+    image: &[u8],
+    volume_uuid: &[u8; 16],
+    password: &str,
 ) -> crate::Result<UnlockedVolume> {
-    Ok(UnlockedVolume { vek: Vec::new() }) // RED stub
+    let bad = |field: &'static str, value: u64, cap: u64| crate::ApfsError::FieldOutOfRange {
+        structure: "unlock_volume",
+        field,
+        value,
+        cap,
+    };
+
+    let container_kb = decrypt_container_keybag(image)?;
+    let rec = volume_records(&container_kb, volume_uuid)?;
+
+    let block_size = crate::bytes::le_u32(image, NX_BLOCK_SIZE) as usize;
+    let start = (rec.volume_keybag_block as usize)
+        .checked_mul(block_size)
+        .ok_or_else(|| bad("vkb_offset", rec.volume_keybag_block, block_size as u64))?;
+    let len = (rec.volume_keybag_blocks as usize)
+        .checked_mul(block_size)
+        .ok_or_else(|| bad("vkb_length", rec.volume_keybag_blocks, block_size as u64))?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| bad("vkb_end", start as u64, len as u64))?;
+    let ct = image
+        .get(start..end)
+        .ok_or_else(|| bad("vkb_past_image", end as u64, image.len() as u64))?;
+
+    // The volume keybag uses the same scheme keyed on the VOLUME UUID.
+    let volume_kb = xts_decrypt_area(ct, volume_uuid, start / KEYBAG_SECTOR);
+
+    let obj = find_kek_object(&volume_kb)
+        .ok_or_else(|| bad("kek_object_absent", volume_kb.len() as u64, 1))?;
+    let kek_info = parse_wrapped_kek(obj)?;
+
+    let derived_v =
+        derive_key_from_password(password.as_bytes(), &kek_info.salt, kek_info.iterations, 32);
+    let derived: [u8; 32] = derived_v
+        .as_slice()
+        .try_into()
+        .map_err(|_| bad("derived_key_len", derived_v.len() as u64, 32))?;
+    let wrapped_kek: [u8; 40] = kek_info
+        .wrapped_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| bad("wrapped_kek_len", kek_info.wrapped_key.len() as u64, 40))?;
+
+    let kek_v = aes_key_unwrap(&derived, &wrapped_kek)?;
+    let kek: [u8; 32] = kek_v
+        .as_slice()
+        .try_into()
+        .map_err(|_| bad("kek_len", kek_v.len() as u64, 32))?;
+    let wrapped_vek: [u8; 40] = rec
+        .wrapped_vek
+        .as_slice()
+        .try_into()
+        .map_err(|_| bad("wrapped_vek_len", rec.wrapped_vek.len() as u64, 40))?;
+
+    Ok(UnlockedVolume {
+        vek: aes_key_unwrap(&kek, &wrapped_vek)?,
+    })
+}
+
+/// AES-128-XTS decrypt an area keyed by `uuid` (both XTS keys).
+fn xts_decrypt_area(ct: &[u8], uuid: &[u8; 16], first_sector: usize) -> Vec<u8> {
+    use aes::cipher::KeyInit;
+    use xts_mode::{get_tweak_default, Xts128};
+    let xts = Xts128::new(aes::Aes128::new(uuid.into()), aes::Aes128::new(uuid.into()));
+    let mut buf = ct.to_vec();
+    xts.decrypt_area(
+        &mut buf,
+        KEYBAG_SECTOR,
+        first_sector as u128,
+        get_tweak_default,
+    );
+    buf
+}
+
+/// Find the KEK object in a decrypted VOLUME keybag.
+///
+/// Tag semantics are CONTEXT-DEPENDENT and that is the trap: 0x03 means
+/// "Keybag Ref" in the CONTAINER bag but "KEK" in the VOLUME bag. Matching only
+/// `WrappingKey` (0x01) finds nothing in a real recs bag.
+fn find_kek_object(keybag: &[u8]) -> Option<&[u8]> {
+    let nkeys = (crate::bytes::le_u16(keybag, KL_NKEYS) as usize).min(MAX_KEYBAG_ENTRIES);
+    let mut off = KL_ENTRIES_OFF;
+    for _ in 0..nkeys {
+        if off + KE_HEADER_LEN > keybag.len() {
+            break;
+        }
+        let raw_tag = crate::bytes::le_u16(keybag, off + KE_TAG);
+        let keylen = crate::bytes::le_u16(keybag, off + KE_KEYLEN) as usize;
+        let data_off = off + KE_HEADER_LEN;
+        let tag = KeybagTag::from_u16(raw_tag);
+        if tag == KeybagTag::WrappingKey || tag == KeybagTag::VolumeUnlockRecords {
+            if let Some(data) = keybag.get(data_off..data_off + keylen) {
+                let seq = ber_find(data, 0x30).unwrap_or(data);
+                if let Some(obj) = ber_find(seq, 0xa3) {
+                    return Some(obj);
+                }
+            }
+        }
+        off += ((KE_HEADER_LEN + keylen + 15) & !15).max(16);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -554,9 +674,15 @@ mod tests {
     /// (`ke_uuid`@0[16], `ke_tag`@16, `ke_keylen`@18, pad[4], `ke_keydata`@24),
     /// each 16-byte aligned (libfsapfs layout).
     fn keybag(entries: &[(u16, usize)]) -> Vec<u8> {
-        let mut data = vec![0u8; 16];
-        data[0..2].copy_from_slice(&1u16.to_le_bytes()); // kl_version
-        data[2..4].copy_from_slice(&(entries.len() as u16).to_le_bytes()); // kl_nkeys
+        // A real keybag block is an APFS object: a 32-byte obj_phys header
+        // precedes the kb_locker, with the magic in o_type at +24. Building
+        // without it produced a fixture that only this parser understood --
+        // the test and the code shared one wrong assumption, so both passed.
+        let mut data = vec![0u8; OBJ_PHYS_LEN + 16];
+        data[24..28].copy_from_slice(b"keys"); // o_type
+        data[OBJ_PHYS_LEN..OBJ_PHYS_LEN + 2].copy_from_slice(&1u16.to_le_bytes()); // kl_version
+        data[OBJ_PHYS_LEN + 2..OBJ_PHYS_LEN + 4]
+            .copy_from_slice(&(entries.len() as u16).to_le_bytes()); // kl_nkeys
         for &(tag, keylen) in entries {
             let mut e = vec![0u8; 24 + keylen];
             e[16..18].copy_from_slice(&tag.to_le_bytes()); // ke_tag
@@ -620,7 +746,10 @@ mod tests {
         let kb = keybag(&[(0x55, 4)]);
         let st = read_keybag(&kb).expect("parse keybag");
         assert!(st.tags_present.contains(&KeybagTag::Unknown));
-        assert_eq!(st.unknown_tags, vec![(0x55u16, 16u64)]);
+        // Offset is derived, not hardcoded: entries begin after obj_phys +
+        // kb_locker, so a header-size change moves this test with the format
+        // instead of silently asserting a stale constant.
+        assert_eq!(st.unknown_tags, vec![(0x55u16, KL_ENTRIES_OFF as u64)]);
     }
 
     #[test]
