@@ -573,38 +573,9 @@ pub fn unlock_volume(
         .ok_or_else(|| bad("vkb_past_image", end as u64, image.len() as u64))?;
 
     // The volume keybag uses the same scheme keyed on the VOLUME UUID.
-    let volume_kb = xts_decrypt_area(ct, volume_uuid, start / KEYBAG_SECTOR);
+    let volume_kb = decrypt_keybag_area(ct, volume_uuid, start / KEYBAG_SECTOR);
 
-    let obj = find_kek_object(&volume_kb)
-        .ok_or_else(|| bad("kek_object_absent", volume_kb.len() as u64, 1))?;
-    let kek_info = parse_wrapped_kek(obj)?;
-
-    let derived_v =
-        derive_key_from_password(password.as_bytes(), &kek_info.salt, kek_info.iterations, 32);
-    let derived: [u8; 32] = derived_v
-        .as_slice()
-        .try_into()
-        .map_err(|_| bad("derived_key_len", derived_v.len() as u64, 32))?;
-    let wrapped_kek: [u8; 40] = kek_info
-        .wrapped_key
-        .as_slice()
-        .try_into()
-        .map_err(|_| bad("wrapped_kek_len", kek_info.wrapped_key.len() as u64, 40))?;
-
-    let kek_v = aes_key_unwrap(&derived, &wrapped_kek)?;
-    let kek: [u8; 32] = kek_v
-        .as_slice()
-        .try_into()
-        .map_err(|_| bad("kek_len", kek_v.len() as u64, 32))?;
-    let wrapped_vek: [u8; 40] = rec
-        .wrapped_vek
-        .as_slice()
-        .try_into()
-        .map_err(|_| bad("wrapped_vek_len", rec.wrapped_vek.len() as u64, 40))?;
-
-    Ok(UnlockedVolume {
-        vek: aes_key_unwrap(&kek, &wrapped_vek)?,
-    })
+    unlock_with_volume_keybag(&volume_kb, &rec, password)
 }
 
 /// Recover a volume key from an already-decrypted volume keybag.
@@ -619,15 +590,48 @@ pub fn unlock_volume(
 /// fixes it at, or when AES key unwrap rejects the integrity check — which is
 /// what a wrong password produces, and it is an error rather than wrong bytes.
 pub fn unlock_with_volume_keybag(
-    _volume_keybag: &[u8],
-    _records: &VolumeRecords,
-    _password: &str,
+    volume_keybag: &[u8],
+    records: &VolumeRecords,
+    password: &str,
 ) -> crate::Result<UnlockedVolume> {
-    Err(crate::ApfsError::FieldOutOfRange {
+    let bad = |field: &'static str, value: u64, cap: u64| crate::ApfsError::FieldOutOfRange {
         structure: "unlock_with_volume_keybag",
-        field: "unimplemented",
-        value: 0,
-        cap: 0,
+        field,
+        value,
+        cap,
+    };
+
+    let obj = find_kek_object(volume_keybag)
+        .ok_or_else(|| bad("kek_object_absent", volume_keybag.len() as u64, 1))?;
+    let kek_info = parse_wrapped_kek(obj)?;
+
+    let derived_v =
+        derive_key_from_password(password.as_bytes(), &kek_info.salt, kek_info.iterations, 32);
+    let derived: [u8; 32] = derived_v
+        .as_slice()
+        .try_into()
+        .map_err(|_| bad("derived_key_len", derived_v.len() as u64, 32))?;
+    let wrapped_kek: [u8; 40] = kek_info
+        .wrapped_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| bad("wrapped_kek_len", kek_info.wrapped_key.len() as u64, 40))?;
+
+    // AES-KW's integrity check is what refuses a wrong password: it fails here
+    // rather than handing back a plausible-looking key that breaks later.
+    let kek_v = aes_key_unwrap(&derived, &wrapped_kek)?;
+    let kek: [u8; 32] = kek_v
+        .as_slice()
+        .try_into()
+        .map_err(|_| bad("kek_len", kek_v.len() as u64, 32))?;
+    let wrapped_vek: [u8; 40] = records
+        .wrapped_vek
+        .as_slice()
+        .try_into()
+        .map_err(|_| bad("wrapped_vek_len", records.wrapped_vek.len() as u64, 40))?;
+
+    Ok(UnlockedVolume {
+        vek: aes_key_unwrap(&kek, &wrapped_vek)?,
     })
 }
 
@@ -1180,6 +1184,34 @@ mod tests {
             bytes_read <= 64 * 1024,
             "the unwrap chain must touch a trivial slice of the image, read {bytes_read} bytes"
         );
+
+        // Equality alone is a DIVERGENCE guard, not a correctness proof: both
+        // paths now share an implementation, so a bug in the shared code moves
+        // both sides together and the comparison stays true. Demonstrated by
+        // mutation -- stubbing the unwrap to a constant left this test green.
+        //
+        // Pinning the value catches that case. It is a REGRESSION PIN against
+        // the current implementation, not independent validation: it proves the
+        // answer stopped changing, never that it was right to begin with. What
+        // would make it Tier-1 is decrypting the fixture's plaintext marker
+        // with this VEK, which is not yet built.
+        use sha2::{Digest as _, Sha256};
+        assert_eq!(
+            Sha256::digest(&got)[..],
+            hex_literal_vek_fingerprint()[..],
+            "the fixture's VEK changed; a shared-path bug moves both sides at once"
+        );
+    }
+
+    /// SHA-256 of the VEK the committed fixture yields for its recorded
+    /// password. Stored hashed so the key itself is not in the repository.
+    #[cfg(test)]
+    fn hex_literal_vek_fingerprint() -> [u8; 32] {
+        [
+            0x12, 0xed, 0x22, 0xee, 0x47, 0xf9, 0x27, 0x28, 0x8c, 0x6e, 0xb2, 0x44, 0xf6, 0xa6,
+            0xd3, 0x54, 0xa2, 0xb5, 0xed, 0x14, 0x18, 0xa6, 0x34, 0x11, 0x64, 0x9d, 0x4e, 0x4a,
+            0xbc, 0xa5, 0xb1, 0x43,
+        ]
     }
 
     /// RED: a wrong password must be refused on the ranged path too. A cheaper
