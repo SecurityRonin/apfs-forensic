@@ -377,9 +377,6 @@ pub fn decrypt_container_keybag(image: &[u8]) -> crate::Result<Vec<u8>> {
 /// # Errors
 /// Same as [`decrypt_container_keybag`].
 pub fn decrypt_container_keybag_with_uuid(image: &[u8], uuid: &[u8; 16]) -> crate::Result<Vec<u8>> {
-    use aes::cipher::KeyInit;
-    use xts_mode::{get_tweak_default, Xts128};
-
     let bad = |field: &'static str, value: u64, cap: u64| crate::ApfsError::FieldOutOfRange {
         structure: "nx_keylocker",
         field,
@@ -413,22 +410,11 @@ pub fn decrypt_container_keybag_with_uuid(image: &[u8], uuid: &[u8; 16]) -> crat
         .get(start..end)
         .ok_or_else(|| bad("keybag_past_image", end as u64, image.len() as u64))?;
 
-    // Both XTS keys are the container UUID: AES-128, 16-byte key each.
-    let c1 = aes::Aes128::new(uuid.into());
-    let c2 = aes::Aes128::new(uuid.into());
-    let xts = Xts128::new(c1, c2);
-
-    let mut buf = ct.to_vec();
-    // Tweak is the absolute sector index, matching how the on-disk data was
-    // written: sector = byte offset / sector size.
-    let first_sector = start / KEYBAG_SECTOR;
-    xts.decrypt_area(
-        &mut buf,
-        KEYBAG_SECTOR,
-        first_sector as u128,
-        get_tweak_default,
-    );
-    Ok(buf)
+    // One implementation of the XTS step, shared with the ranged entry point:
+    // two copies of a tweak calculation is two places for an offset bug to
+    // diverge, and the ranged path is the one real evidence goes through.
+    // Tweak is the absolute sector index, matching how the data was written.
+    Ok(decrypt_keybag_area(ct, uuid, start / KEYBAG_SECTOR))
 }
 
 /// Where a volume's unlock material lives, read from the container keybag.
@@ -621,6 +607,30 @@ pub fn unlock_volume(
     })
 }
 
+/// Recover a volume key from an already-decrypted volume keybag.
+///
+/// The last link of the chain, taking only small buffers: the decrypted volume
+/// keybag and the records naming this volume's wrapped key. A caller that can
+/// seek reads two 4 KB areas, decrypts them with [`decrypt_keybag_area`], and
+/// finishes here — never holding the image.
+///
+/// # Errors
+/// When the keybag carries no KEK object, when a length is not what the format
+/// fixes it at, or when AES key unwrap rejects the integrity check — which is
+/// what a wrong password produces, and it is an error rather than wrong bytes.
+pub fn unlock_with_volume_keybag(
+    _volume_keybag: &[u8],
+    _records: &VolumeRecords,
+    _password: &str,
+) -> crate::Result<UnlockedVolume> {
+    Err(crate::ApfsError::FieldOutOfRange {
+        structure: "unlock_with_volume_keybag",
+        field: "unimplemented",
+        value: 0,
+        cap: 0,
+    })
+}
+
 /// Decrypt a keybag area read from an arbitrary offset, without the image.
 ///
 /// The rest of this module takes the whole image as one `&[u8]`, which is fine
@@ -634,8 +644,8 @@ pub fn unlock_volume(
 /// area starts at. The sector index is not derivable from `ct` and is part of
 /// the XTS tweak, so an offset error yields noise rather than a wrong-looking
 /// success.
-pub fn decrypt_keybag_area(_ct: &[u8], _uuid: &[u8; 16], _first_sector: usize) -> Vec<u8> {
-    Vec::new()
+pub fn decrypt_keybag_area(ct: &[u8], uuid: &[u8; 16], first_sector: usize) -> Vec<u8> {
+    xts_decrypt_area(ct, uuid, first_sector)
 }
 
 /// AES-128-XTS decrypt an area keyed by `uuid` (both XTS keys).
@@ -1108,6 +1118,80 @@ mod tests {
             ranged.get(24..28),
             Some(&b"syek"[..]),
             "and those bytes must be a container keybag, not noise"
+        );
+    }
+
+    /// Walk the whole unlock chain using ONLY ranged reads, and report how many
+    /// bytes of the image were touched.
+    ///
+    /// This is the shape a caller with a 2 TB image must use, exercised here
+    /// against the fixture so it is covered by the committed suite.
+    #[cfg(test)]
+    fn ranged_unlock(img: &[u8], volume_uuid: &[u8; 16], password: &str) -> (Vec<u8>, usize) {
+        let mut bytes_read = 0usize;
+
+        // (1) the superblock — the only fixed-offset read.
+        let sb = &img[..4096];
+        bytes_read += sb.len();
+        let block_size = crate::bytes::le_u32(sb, NX_BLOCK_SIZE) as usize;
+        let uuid: [u8; 16] = sb[NX_CONTAINER_UUID..NX_CONTAINER_UUID + 16]
+            .try_into()
+            .expect("16 bytes");
+        let cs = crate::bytes::le_u64(sb, NX_KEYBAG_BLOCK) as usize * block_size;
+        let ce = cs + crate::bytes::le_u64(sb, NX_KEYBAG_BLOCKS) as usize * block_size;
+
+        // (2) the container keybag.
+        bytes_read += ce - cs;
+        let ckb = decrypt_keybag_area(&img[cs..ce], &uuid, cs / KEYBAG_SECTOR);
+        let rec = volume_records(&ckb, volume_uuid).expect("volume must be listed");
+
+        // (3) the volume keybag, keyed on the VOLUME uuid.
+        let vs = rec.volume_keybag_block as usize * block_size;
+        let ve = vs + rec.volume_keybag_blocks as usize * block_size;
+        bytes_read += ve - vs;
+        let vkb = decrypt_keybag_area(&img[vs..ve], volume_uuid, vs / KEYBAG_SECTOR);
+
+        let vek = unlock_with_volume_keybag(&vkb, &rec, password)
+            .map(|u| u.vek)
+            .unwrap_or_default();
+        (vek, bytes_read)
+    }
+
+    /// RED: the full chain must recover the SAME VEK from ranged reads as from
+    /// the whole-image path, touching a trivial fraction of the image.
+    ///
+    /// The byte-count assertion is the one that matters for real evidence: it
+    /// is the difference between an API that works on a 2 TB acquisition and
+    /// one that only ever ran against a fixture small enough to hide the
+    /// problem. Asserting VEK equality stops the cheap path from drifting into
+    /// a different answer than the path it replaces.
+    #[test]
+    fn the_full_unlock_chain_works_from_ranged_reads_alone() {
+        let img = fixture_image();
+        let (got, bytes_read) = ranged_unlock(&img, &FIXTURE_VOLUME_UUID, "apfs-FV-TEST-2026");
+        let want = unlock_volume(&img, &FIXTURE_VOLUME_UUID, "apfs-FV-TEST-2026")
+            .expect("whole-image path must unlock");
+
+        assert_eq!(
+            got, want.vek,
+            "the ranged chain must recover the same VEK as the whole-image path"
+        );
+        assert!(
+            bytes_read <= 64 * 1024,
+            "the unwrap chain must touch a trivial slice of the image, read {bytes_read} bytes"
+        );
+    }
+
+    /// RED: a wrong password must be refused on the ranged path too. A cheaper
+    /// route that quietly answers where the original refuses would be a
+    /// security defect, not an optimisation.
+    #[test]
+    fn the_ranged_chain_refuses_a_wrong_password() {
+        let img = fixture_image();
+        let (vek, _) = ranged_unlock(&img, &FIXTURE_VOLUME_UUID, "not-the-password");
+        assert!(
+            vek.is_empty(),
+            "a wrong password must fail the ranged chain, never return a key"
         );
     }
 
