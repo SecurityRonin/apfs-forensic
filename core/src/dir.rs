@@ -152,6 +152,7 @@ where
     descend_virtual(
         reader,
         &omap,
+        volume.vek(),
         volume.root_tree_oid(),
         xid,
         block_size,
@@ -179,6 +180,9 @@ fn child_may_contain_oid(sep_oid: u64, next_sep_oid: Option<u64>, target: u64) -
 fn descend_virtual<R, F>(
     reader: &mut R,
     omap: &ObjectMap,
+    // Volume key, when the caller holds one; None leaves ciphertext alone so a
+    // locked volume fails its checksum instead of yielding garbage.
+    vek: Option<&[u8; 32]>,
     node_oid: u64,
     xid: u64,
     block_size: usize,
@@ -211,6 +215,16 @@ where
     let offset = entry.paddr.saturating_mul(block_size as u64);
     reader.seek(std::io::SeekFrom::Start(offset))?;
     reader.read_exact(&mut buf)?;
+
+    // On an encrypted volume the tree itself is ciphertext. The omap entry says
+    // so per node, and the tweak is that node's own block address. Decrypt
+    // BEFORE the checksum: Fletcher-64 covers plaintext, so on ciphertext it
+    // would fail and the volume would look corrupt rather than locked.
+    if entry.flags & crate::encryption::OMAP_VAL_ENCRYPTED != 0 {
+        if let Some(vek) = vek {
+            crate::encryption::decrypt_volume_area(&mut buf, vek, entry.paddr, block_size);
+        }
+    }
 
     // Checksum-before-trust.
     let stored = fletcher64_stored(&buf);
@@ -253,6 +267,7 @@ where
         descend_virtual(
             reader,
             omap,
+            vek,
             child,
             xid,
             block_size,

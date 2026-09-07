@@ -1421,7 +1421,7 @@ mod tests {
     /// This is the claim every earlier test stopped short of. A recovered VEK
     /// that passes AES-KW proves the key is AUTHENTIC; a checksum-valid node
     /// proves it is CORRECT; only this proves the whole stack -- node
-    /// decryption, extent crypto_id tweaks, and assembly -- actually yields the
+    /// decryption, extent `crypto_id` tweaks, and assembly -- actually yields the
     /// file a user wrote.
     ///
     /// Ground truth is independent of the reader: the marker string was written

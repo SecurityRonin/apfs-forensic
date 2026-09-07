@@ -206,11 +206,6 @@ impl ApfsVolume {
         self.root_tree_type
     }
 
-    /// `apfs_omap_oid` — the block address of this volume's object map
-    /// (`omap_phys_t`, a physical object). The fs-tree's virtual oids resolve
-    /// through this omap.
-    #[must_use]
-
     /// Supply the volume encryption key recovered from a password.
     ///
     /// With it set, B-tree nodes flagged `OMAP_VAL_ENCRYPTED` and file extents
@@ -221,10 +216,15 @@ impl ApfsVolume {
     }
 
     /// The volume encryption key, if one has been supplied.
+    #[must_use]
     pub fn vek(&self) -> Option<&[u8; 32]> {
         self.vek.as_ref()
     }
 
+    /// `apfs_omap_oid` — the block address of this volume's object map
+    /// (`omap_phys_t`, a physical object). The fs-tree's virtual oids resolve
+    /// through this omap.
+    #[must_use]
     pub fn omap_oid(&self) -> u64 {
         self.omap_oid
     }

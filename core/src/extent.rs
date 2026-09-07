@@ -32,6 +32,11 @@ const OFF_FEXT_KEY_LOGICAL: usize = 8;
 // j_file_extent_val_t field offsets.
 const OFF_FEXT_LEN_AND_FLAGS: usize = 0;
 const OFF_FEXT_PHYS_BLOCK: usize = 8;
+// j_file_extent_val_t.crypto_id -- the AES-XTS tweak for this extent's data on
+// an encrypted volume. It is STORED rather than derived from position because
+// APFS may relocate an extent without re-encrypting it, at which point the
+// block address stops predicting the tweak.
+const OFF_FEXT_CRYPTO_ID: usize = 16;
 
 /// Hard cap on assembled file size (allocation-bomb defense). A single image we
 /// would read in memory cannot legitimately exceed this; a DSTREAM `size` or an
@@ -48,6 +53,9 @@ pub struct FileExtent {
     pub len: u64,
     /// Starting physical block (0 = sparse hole).
     pub phys_block_num: u64,
+    /// `crypto_id` — the AES-XTS tweak of this extent's first block on an
+    /// encrypted volume. Zero means the data is not encrypted.
+    pub crypto_id: u64,
 }
 
 /// List the `FILE_EXTENT` records of a data stream (`stream_oid`, an inode's
@@ -79,6 +87,7 @@ pub fn list_extents<R: Read + Seek>(
             logical_offset,
             len,
             phys_block_num,
+            crypto_id: crate::bytes::le_u64(value, OFF_FEXT_CRYPTO_ID),
         });
     })?;
     out.sort_by_key(|e| e.logical_offset);
@@ -133,7 +142,33 @@ pub fn read_stream<R: Read + Seek>(
             },
         )?;
         reader.seek(std::io::SeekFrom::Start(byte_off))?;
-        reader.read_exact(&mut out[start..start + copy_len])?;
+
+        match volume.vek() {
+            Some(vek) if ext.crypto_id != 0 => {
+                // AES-XTS is a SECTOR transform: block j within a sector is
+                // whitened by tweak * alpha^j, so a partial sector cannot be
+                // decrypted on its own. Reading only the logical bytes -- a
+                // sound optimisation for plaintext -- silently yields the first
+                // 16 bytes correct and garbage after, because the short tail
+                // takes the ciphertext-stealing path. Read WHOLE blocks, then
+                // slice.
+                let nblocks = copy_len.div_ceil(block_size);
+                let mut tmp = vec![0u8; nblocks * block_size];
+                reader.read_exact(&mut tmp)?;
+                // The tweak advances one per BLOCK across the extent, so each
+                // block is decrypted with crypto_id + its index.
+                for (i, blk) in tmp.chunks_mut(block_size).enumerate() {
+                    crate::encryption::decrypt_volume_area(
+                        blk,
+                        vek,
+                        ext.crypto_id.saturating_add(i as u64),
+                        block_size,
+                    );
+                }
+                out[start..start + copy_len].copy_from_slice(&tmp[..copy_len]);
+            }
+            _ => reader.read_exact(&mut out[start..start + copy_len])?,
+        }
     }
     Ok(out)
 }
