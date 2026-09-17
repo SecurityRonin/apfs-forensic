@@ -91,10 +91,15 @@ fn read_at_returns_the_attribute_value() {
         .find(|s| s.name.as_deref() == Some(b"myxattr".as_slice()))
         .expect("myxattr must be listed");
 
-    assert!(matches!(s.id, StreamId::Xattr(_)), "addressed as an xattr stream");
+    assert!(
+        matches!(s.id, StreamId::Xattr(_)),
+        "addressed as an xattr stream"
+    );
 
     let mut buf = vec![0u8; usize::try_from(s.size).unwrap_or(0).max(64)];
-    let n = fs.read_at(id, s.id, 0, &mut buf).expect("read the attribute");
+    let n = fs
+        .read_at(id, s.id, 0, &mut buf)
+        .expect("read the attribute");
     buf.truncate(n);
     assert_eq!(
         buf.as_slice(),
