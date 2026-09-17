@@ -19,13 +19,15 @@ use std::sync::Mutex;
 use forensic_vfs::{
     Allocation, ByteRun, DirEntry, DirStream, ExtentStream, FileId, FileSystem, FsKind, FsMeta,
     MacbTimes, NodeKind, NodeStream, ResidencyKind, RunAlloc, RunFlags, RunInfo, SectorSizes,
-    SmallHex, StreamId, TimeResolution, TimeSource, TimeStamp, TimeZonePolicy, VfsError, VfsResult,
+    SmallHex, StreamId, StreamInfo, StreamKind, TimeResolution, TimeSource, TimeStamp,
+    TimeZonePolicy, VfsError, VfsResult,
 };
 
 use crate::dir::{self, ROOT_DIR_INO_NUM};
 use crate::extent;
 use crate::inode::Inode;
 use crate::volume::ApfsVolume;
+use crate::xattr;
 use crate::{ApfsContainer, ApfsError, Result};
 
 /// `S_IFMT` mask isolating the file-type bits of a Unix `mode`.
@@ -60,6 +62,40 @@ pub struct ApfsFs<R: Read + Seek> {
 }
 
 impl<R: Read + Seek> ApfsFs<R> {
+    /// Read one extended attribute's bytes, addressed by its index in
+    /// [`Self::data_streams`].
+    ///
+    /// An index past the end is `Ok(0)` rather than an error: the same answer a
+    /// read past the end of any stream gives, so a caller cannot tell an absent
+    /// attribute from an empty one by the error type alone — it must consult the
+    /// listing, which is where existence is stated.
+    fn read_xattr_at(&self, node: u64, idx: u16, off: u64, buf: &mut [u8]) -> VfsResult<usize> {
+        let bs = self.block_size;
+        let mut guard = self.reader.lock().map_err(|_| poisoned())?;
+        let list = xattr::list_xattrs(&mut *guard, &self.volume, node, bs).map_err(map_err)?;
+        let Some(x) = list.into_iter().nth(idx as usize) else {
+            return Ok(0);
+        };
+        let data = match x.value {
+            xattr::XattrValue::Embedded(b) => b,
+            xattr::XattrValue::Stream { dstream_oid, size } => {
+                extent::read_stream(&mut *guard, &self.volume, dstream_oid, size, bs)
+                    .map_err(map_err)?
+            } // No catch-all, for the same reason as data_streams: a new storage
+              // form must break the build, not return empty bytes for an
+              // attribute that exists.
+        };
+        let start = usize::try_from(off).unwrap_or(usize::MAX);
+        if start >= data.len() {
+            return Ok(0);
+        }
+        let n = buf.len().min(data.len() - start);
+        if let (Some(dst), Some(src)) = (buf.get_mut(..n), data.get(start..start + n)) {
+            dst.copy_from_slice(src);
+            return Ok(n);
+        }
+        Ok(0) // cov:unreachable: n is bounded by both slices above
+    }
     /// Open the first volume of an APFS container as a mountable filesystem.
     ///
     /// Walks the container to its live NXSB, resolves the first volume superblock
@@ -327,8 +363,8 @@ impl<R: Read + Seek + Send> FileSystem for ApfsFs<R> {
 
     fn extents(&self, ino: FileId, stream: StreamId) -> VfsResult<ExtentStream> {
         let node = oid_of(ino)?;
-        require_default_stream(stream)?;
         let bs = self.block_size;
+        require_default_stream(stream)?;
         let mut guard = self.reader.lock().map_err(|_| poisoned())?;
         let inode = dir::load_inode(&mut *guard, &self.volume, node, bs).map_err(map_err)?;
         // The main-fork stream oid is the inode's `private_id` (what `read_data`
@@ -376,8 +412,73 @@ impl<R: Read + Seek + Send> FileSystem for ApfsFs<R> {
         Ok(build_meta(&inode))
     }
 
+    /// Report the node's default data stream and every extended attribute.
+    ///
+    /// Attributes are evidence: on macOS they carry the quarantine flag, Finder
+    /// metadata and decmpfs. Before this the adapter inherited the trait's
+    /// default — an empty list — so every consumer was told no file anywhere had
+    /// one, a negative finding produced by the reader rather than the image.
+    ///
+    /// Ordering is the reader's, and the index in [`StreamId::Xattr`] is that
+    /// position. A caller must therefore address an attribute by the id from
+    /// THIS listing rather than one remembered across calls.
+    fn data_streams(&self, ino: FileId) -> VfsResult<Vec<StreamInfo>> {
+        let node = oid_of(ino)?;
+        let bs = self.block_size;
+        let mut guard = self.reader.lock().map_err(|_| poisoned())?;
+
+        let size = dir::load_inode(&mut *guard, &self.volume, node, bs)
+            .map_err(map_err)?
+            .size
+            .unwrap_or(0);
+        let mut out = vec![StreamInfo {
+            id: StreamId::Default,
+            name: None,
+            size,
+            residency: ResidencyKind::NonResident,
+            kind: StreamKind::ApfsNamed,
+        }];
+
+        for (i, x) in xattr::list_xattrs(&mut *guard, &self.volume, node, bs)
+            .map_err(map_err)?
+            .into_iter()
+            .enumerate()
+        {
+            let (len, residency) = match &x.value {
+                // Embedded values live in the record itself; stream-backed ones
+                // are out in extents. The distinction is evidential -- it is
+                // where the bytes physically are.
+                xattr::XattrValue::Embedded(b) => (
+                    b.len() as u64,
+                    ResidencyKind::Resident {
+                        inline_len: u32::try_from(b.len()).unwrap_or(u32::MAX),
+                    },
+                ),
+                xattr::XattrValue::Stream { size, .. } => (*size, ResidencyKind::NonResident),
+                // Deliberately NO catch-all: inside this crate every XattrValue
+                // variant is reachable, so adding a storage form must fail to
+                // COMPILE here rather than silently reporting length 0 and
+                // hiding how the attribute is stored.
+            };
+            out.push(StreamInfo {
+                id: StreamId::Xattr(u16::try_from(i).unwrap_or(u16::MAX)),
+                name: Some(x.name.clone().into_bytes()),
+                size: len,
+                residency,
+                kind: StreamKind::Xattr,
+            });
+        }
+        Ok(out)
+    }
+
     fn read_at(&self, ino: FileId, stream: StreamId, off: u64, buf: &mut [u8]) -> VfsResult<usize> {
         let node = oid_of(ino)?;
+        // Attributes are addressed as their own streams; serve them before the
+        // default-stream guard, which exists to refuse stream kinds this
+        // filesystem does not have.
+        if let StreamId::Xattr(idx) = stream {
+            return self.read_xattr_at(node, idx, off, buf);
+        }
         require_default_stream(stream)?;
         let bs = self.block_size;
         let mut guard = self.reader.lock().map_err(|_| poisoned())?;
