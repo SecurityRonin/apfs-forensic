@@ -54,3 +54,9 @@ sha2 = { workspace = true }
 
 [lints]
 workspace = true
+
+# Exercises the forensic-vfs adapter, so it needs the optional feature that
+# compiles it.
+[[test]]
+name = "vfs_xattr_streams"
+required-features = ["vfs"]
