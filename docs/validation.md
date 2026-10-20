@@ -205,6 +205,7 @@ resource fork (blocks 345–426). Provenance + MD5 in `tests/data/README.md`.
 | **nested-file read** | `/Dir1/Beth.txt` (33 B, phys 400) | **macOS** SHA-256 = `ee7c2682…` |
 | **decmpfs type-8 LZVN (resource fork)** | `/compressed.txt` (180000 B): `com.apple.decmpfs` header (type 8) + a `com.apple.ResourceFork` **stream** xattr (dstream 24, 1526 B, three LZVN chunks); decoded transparently by `read_data` | **macOS `cp`** SHA-256 = `3f58a418…` — identical to our decoded output (the cross-extractor check) |
 | **decmpfs other types** | inline 1/9, zlib 3 (+0xFF-stored), LZVN 7 (real chunk + 0x06-stored), LZFSE 11, resource-fork zlib 4 / LZFSE 12 / uncompressed 10 | `forensicnomicon::decmpfs::classify` + `flate2`/`lzvn`/`lzfse_rust`; round-trip / real-chunk |
+| **decmpfs stream-backed header** | a `com.apple.decmpfs` stored as a dstream rather than embedded is read through `read_stream` | construction |
 | **decmpfs refusals (fail-loud)** | bad magic, truncated, unknown type, dedup type 5, LZBitmap 13/14, missing fork, length mismatch all return a named `ApfsError::Decmpfs` — never fabricated bytes | construction |
 | **extended attributes** | `/plain.txt` carries `com.example.tag`="forensic-marker-P4", `user.note`="second custom attr" (both embedded) | **macOS `xattr -l`** — names + values match `list_xattrs` |
 | **symlink target** | `/symlink_to_beth` → `com.apple.fs.symlink` (embedded) = `"Dir1/Beth.txt"` | **macOS `readlink`** = `Dir1/Beth.txt` |
