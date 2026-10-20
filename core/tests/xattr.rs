@@ -169,13 +169,14 @@ fn file_without_resource_fork_yields_none() {
 }
 
 /// Synthetic single-leaf fs-tree exercising the xattr paths the real macOS
-/// corpus does not produce: an *embedded* (rather than stream) ResourceFork, and
-/// a malformed zero-length-name XATTR key that must be skipped.
+/// corpus does not produce: an *embedded* (rather than stream) ResourceFork, a
+/// stream-backed decmpfs header, and a malformed zero-length-name XATTR key that
+/// must be skipped.
 mod synthetic {
     use super::{Cursor, BLOCK_SIZE};
     use apfs_core::object::fletcher64_checksum;
     use apfs_core::volume::ApfsVolume;
-    use apfs_core::xattr::{list_xattrs, resource_fork, XattrValue};
+    use apfs_core::xattr::{decmpfs_header, list_xattrs, resource_fork, XattrValue};
 
     fn put_u16(b: &mut [u8], o: usize, v: u16) {
         b[o..o + 2].copy_from_slice(&v.to_le_bytes());
@@ -249,7 +250,7 @@ mod synthetic {
         seal(block, 0xd);
     }
     fn build(records: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
-        let mut img = vec![0u8; BLOCK_SIZE * 4];
+        let mut img = vec![0u8; BLOCK_SIZE * 5];
         write_apsb(&mut img[0..BLOCK_SIZE]);
         write_omap_header(&mut img[BLOCK_SIZE..2 * BLOCK_SIZE], 2);
         write_omap_tree(&mut img[2 * BLOCK_SIZE..3 * BLOCK_SIZE], &[(100, 3)]);
@@ -266,6 +267,50 @@ mod synthetic {
         val.extend_from_slice(&(data.len() as u16).to_le_bytes());
         val.extend_from_slice(data);
         (key, val)
+    }
+
+    /// As [`embedded_xattr`], but the value is a `j_xattr_dstream_t`.
+    fn stream_xattr(oid: u64, name: &[u8], dstream_oid: u64, size: u64) -> (Vec<u8>, Vec<u8>) {
+        let mut key = jkey(4, oid).to_le_bytes().to_vec();
+        key.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        key.extend_from_slice(name);
+        let mut xdata = dstream_oid.to_le_bytes().to_vec();
+        xdata.extend_from_slice(&size.to_le_bytes());
+        xdata.resize(48, 0);
+        let mut val = 0x0001u16.to_le_bytes().to_vec(); // STREAM
+        val.extend_from_slice(&(xdata.len() as u16).to_le_bytes());
+        val.extend_from_slice(&xdata);
+        (key, val)
+    }
+
+    fn file_extent(oid: u64, logical: u64, len: u64, phys: u64) -> (Vec<u8>, Vec<u8>) {
+        let mut key = jkey(8, oid).to_le_bytes().to_vec();
+        key.extend_from_slice(&logical.to_le_bytes());
+        let mut val = (len & 0x00ff_ffff_ffff_ffff).to_le_bytes().to_vec();
+        val.extend_from_slice(&phys.to_le_bytes());
+        val.extend_from_slice(&0u64.to_le_bytes()); // crypto_id
+        (key, val)
+    }
+
+    #[test]
+    fn stream_backed_decmpfs_header_is_resolved() {
+        // A decmpfs header can live in a dstream instead of the record.
+        let (oid, dstream) = (60u64, 61u64);
+        let mut hdr = 0x636d_7066u32.to_le_bytes().to_vec(); // cmpf
+        hdr.extend_from_slice(&9u32.to_le_bytes()); // type 9
+        hdr.extend_from_slice(&3u64.to_le_bytes());
+        hdr.extend_from_slice(b"\xCCabc");
+        let mut img = build(&[
+            stream_xattr(oid, b"com.apple.decmpfs\0", dstream, hdr.len() as u64),
+            file_extent(dstream, 0, BLOCK_SIZE as u64, 4),
+        ]);
+        img[4 * BLOCK_SIZE..4 * BLOCK_SIZE + hdr.len()].copy_from_slice(&hdr);
+        let vol = ApfsVolume::parse(&img[0..BLOCK_SIZE]).expect("apsb");
+        let mut r = Cursor::new(img);
+        let got = decmpfs_header(&mut r, &vol, oid, BLOCK_SIZE)
+            .expect("decmpfs_header")
+            .expect("present");
+        assert_eq!(got, hdr);
     }
 
     #[test]

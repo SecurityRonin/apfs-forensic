@@ -147,12 +147,12 @@ pub fn get_xattr<R: Read + Seek>(
 }
 
 /// Return the raw `com.apple.decmpfs` header bytes for an inode, if it is a
-/// transparently-compressed file. The decmpfs header is always embedded in the
-/// xattr (the bulk payload, when large, lives in the resource fork — see
-/// [`resource_fork`]).
+/// transparently-compressed file (the bulk payload, when large, lives in the
+/// resource fork — see [`resource_fork`]).
 ///
 /// # Errors
-/// As [`list_xattrs`].
+/// As [`list_xattrs`], plus the structural errors of
+/// [`crate::extent::read_stream`] when the header is stream-backed.
 pub fn decmpfs_header<R: Read + Seek>(
     reader: &mut R,
     volume: &ApfsVolume,
@@ -160,10 +160,12 @@ pub fn decmpfs_header<R: Read + Seek>(
     block_size: usize,
 ) -> crate::Result<Option<Vec<u8>>> {
     match get_xattr(reader, volume, inode_oid, XATTR_NAME_DECMPFS, block_size)? {
-        // The decmpfs xattr is embedded; an unexpected stream form yields its
-        // (empty) embedded bytes, which the decoder then rejects loudly.
         Some(XattrValue::Embedded(bytes)) => Ok(Some(bytes)),
-        Some(XattrValue::Stream { .. }) | None => Ok(None),
+        Some(XattrValue::Stream { dstream_oid, size }) => {
+            let bytes = crate::extent::read_stream(reader, volume, dstream_oid, size, block_size)?;
+            Ok(Some(bytes))
+        }
+        None => Ok(None),
     }
 }
 
