@@ -1,5 +1,10 @@
 //! `apfs-forensic` — a graded anomaly auditor over [`apfs_core`].
 //!
+//! Its `audit*` entry points take `apfs_core` types (`ApfsVolume`,
+//! `ApfsContainer`, `Inode`, …) and [`Result`] carries `apfs_core::ApfsError`,
+//! so `apfs-core` is a public dependency: an incompatible `apfs-core` changes
+//! this crate's API as well.
+//!
 //! Mirrors `ntfs-forensic`: a typed [`AnomalyKind`] domain enum that keeps APFS
 //! knowledge, plus `audit_*` entry points that convert each anomaly into a
 //! [`forensicnomicon::report::Finding`] via [`forensicnomicon::report::Observation`]
